@@ -1,0 +1,27 @@
+{
+  "name": "cloud-agent-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference implementation for a Cloud Agent Platform with orchestration, sandboxed tool execution, and streaming job state.",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx apps/api/src/server.ts",
+    "dev:web": "vite --host 127.0.0.1 apps/web/src",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/apps/api/src/server.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^9.0.1",
+    "@fastify/websocket": "^10.0.1",
+    "fastify": "^4.28.1",
+    "nanoid": "^5.0.7",
+    "tsx": "^4.16.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.3",
+    "vite": "^5.3.3"
+  }
+}
