@@ -10,8 +10,9 @@ import {
   OpenAiCompatibleProvider,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
-import { LocalSandbox } from "../../../packages/sandbox/src/index.js";
+import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
 import type { LlmProvider } from "../../../packages/agent-core/src/index.js";
+import type { Sandbox } from "../../../packages/agent-core/src/types.js";
 
 const createJobSchema = z.object({
   task: z.string().min(3),
@@ -20,6 +21,12 @@ const createJobSchema = z.object({
 
 export interface AppOptions {
   sandboxRoot: string;
+  sandboxDriver?: "local" | "docker";
+  sandboxImage?: string;
+  sandboxCpus?: string;
+  sandboxMemory?: string;
+  sandboxNetwork?: "none" | "bridge" | "host";
+  sandboxTimeoutMs?: number;
   maxSteps: number;
   defaultSourcePath?: string;
 }
@@ -31,7 +38,7 @@ export async function buildApp(options: AppOptions) {
 
   const store = new InMemoryJobStore();
   const queue = new InMemoryJobQueue(2);
-  const sandbox = new LocalSandbox({ rootDir: options.sandboxRoot });
+  const sandbox = createSandbox(options);
   const llm = createLlmProvider();
   const orchestrator = new AgentOrchestrator({
     store,
@@ -94,6 +101,21 @@ export async function buildApp(options: AppOptions) {
   });
 
   return app;
+}
+
+function createSandbox(options: AppOptions): Sandbox {
+  if (options.sandboxDriver === "docker") {
+    return new DockerSandbox({
+      rootDir: options.sandboxRoot,
+      image: options.sandboxImage ?? "cloud-agent-sandbox:latest",
+      cpus: options.sandboxCpus,
+      memory: options.sandboxMemory,
+      network: options.sandboxNetwork ?? "none",
+      defaultTimeoutMs: options.sandboxTimeoutMs
+    });
+  }
+
+  return new LocalSandbox({ rootDir: options.sandboxRoot });
 }
 
 function createLlmProvider(): LlmProvider {
