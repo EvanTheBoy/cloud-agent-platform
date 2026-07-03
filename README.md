@@ -69,6 +69,13 @@ job workspace mounted at `/workspace`. Containers are removed after each
 command, while the per-job workspace remains on the host so later steps in the
 same job can see earlier file changes.
 
+Docker sandbox execution also applies conservative defaults such as dropped
+capabilities, `no-new-privileges`, a PID limit, a read-only container root
+filesystem, a writable `/tmp` tmpfs, and the host numeric UID/GID where
+available. Set `SANDBOX_USER` only when you intentionally need a fixed container
+user. Source imports are restricted to `SANDBOX_SOURCE_ROOT` and startup fails
+on invalid sandbox configuration values.
+
 ## Project Layout
 
 ```text

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { SandboxCommand, SandboxResult } from "../../agent-core/src/types.js";
+import { OutputBuffer } from "./output-buffer.js";
 import { WorkspaceSandbox, type WorkspaceSandboxOptions } from "./workspace-sandbox.js";
 
 export interface LocalSandboxOptions extends WorkspaceSandboxOptions {}
@@ -24,8 +25,8 @@ export class LocalSandbox extends WorkspaceSandbox {
         stdio: ["ignore", "pipe", "pipe"]
       });
 
-      let stdout = "";
-      let stderr = "";
+      const stdout = new OutputBuffer();
+      const stderr = new OutputBuffer();
       let timedOut = false;
 
       const timer = setTimeout(() => {
@@ -34,17 +35,17 @@ export class LocalSandbox extends WorkspaceSandbox {
       }, timeoutMs);
 
       child.stdout.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString("utf8");
+        stdout.append(chunk);
       });
       child.stderr.on("data", (chunk: Buffer) => {
-        stderr += chunk.toString("utf8");
+        stderr.append(chunk);
       });
 
       child.on("close", (exitCode) => {
         clearTimeout(timer);
         resolvePromise({
-          stdout: stdout.slice(0, 20_000),
-          stderr: (timedOut ? `Command timed out after ${timeoutMs}ms\n` : "") + stderr.slice(0, 20_000),
+          stdout: stdout.toString(),
+          stderr: (timedOut ? `Command timed out after ${timeoutMs}ms\n` : "") + stderr.toString(),
           exitCode,
           durationMs: Date.now() - started
         });

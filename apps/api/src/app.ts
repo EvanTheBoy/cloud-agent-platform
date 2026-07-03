@@ -1,6 +1,8 @@
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import Fastify from "fastify";
+import { realpath } from "node:fs/promises";
+import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   AgentOrchestrator,
@@ -26,9 +28,12 @@ export interface AppOptions {
   sandboxCpus?: string;
   sandboxMemory?: string;
   sandboxNetwork?: "none" | "bridge" | "host";
+  sandboxUser?: string;
+  sandboxPidsLimit?: number;
   sandboxTimeoutMs?: number;
   maxSteps: number;
   defaultSourcePath?: string;
+  allowedSourceRoot?: string;
 }
 
 export async function buildApp(options: AppOptions) {
@@ -61,8 +66,12 @@ export async function buildApp(options: AppOptions) {
   app.post("/jobs", async (request, reply) => {
     const parsed = createJobSchema.parse(request.body);
     const jobId = crypto.randomUUID();
+    const sourcePath = await resolveAllowedSourcePath(
+      parsed.sourcePath ?? options.defaultSourcePath ?? process.cwd(),
+      options.allowedSourceRoot ?? options.defaultSourcePath ?? process.cwd()
+    );
     const workspacePath = await sandbox.prepare(jobId);
-    await sandbox.importDirectory(jobId, parsed.sourcePath ?? options.defaultSourcePath ?? process.cwd());
+    await sandbox.importDirectory(jobId, sourcePath);
     const job = await store.create({ id: jobId, task: parsed.task, workspacePath });
     await queue.enqueue(job.id);
     return reply.code(202).send({ job });
@@ -111,6 +120,8 @@ function createSandbox(options: AppOptions): Sandbox {
       cpus: options.sandboxCpus,
       memory: options.sandboxMemory,
       network: options.sandboxNetwork ?? "none",
+      user: options.sandboxUser,
+      pidsLimit: options.sandboxPidsLimit,
       defaultTimeoutMs: options.sandboxTimeoutMs
     });
   }
@@ -128,4 +139,14 @@ function createLlmProvider(): LlmProvider {
   }
 
   return new DemoLlmProvider();
+}
+
+async function resolveAllowedSourcePath(sourcePath: string, allowedRoot: string): Promise<string> {
+  const realSourcePath = await realpath(resolve(sourcePath));
+  const realAllowedRoot = await realpath(resolve(allowedRoot));
+  const rel = relative(realAllowedRoot, realSourcePath);
+  if (rel === ".." || rel.startsWith(`..${sep}`)) {
+    throw new Error(`sourcePath must be inside allowed source root: ${realAllowedRoot}`);
+  }
+  return realSourcePath;
 }
