@@ -19,6 +19,11 @@ npm install
 npm run dev
 ```
 
+The API server loads `.env` from the project root on startup. When `OPENAI_API_KEY`
+is set, it uses the OpenAI-compatible chat-completions provider configured by
+`OPENAI_BASE_URL` and `OPENAI_MODEL`; otherwise it falls back to the local demo
+provider.
+
 Create a job:
 
 ```bash

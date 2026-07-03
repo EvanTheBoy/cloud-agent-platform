@@ -1,5 +1,9 @@
 import { resolve } from "node:path";
-import { buildApp } from "./app.js";
+import { loadEnvFile } from "./env.js";
+
+loadEnvFile();
+
+const { buildApp } = await import("./app.js");
 
 const port = Number(process.env.PORT ?? 8080);
 const sandboxRoot = resolve(process.env.SANDBOX_ROOT ?? "./workspace-runs");

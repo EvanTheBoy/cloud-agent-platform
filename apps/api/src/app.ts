@@ -7,9 +7,11 @@ import {
   DemoLlmProvider,
   InMemoryJobQueue,
   InMemoryJobStore,
+  OpenAiCompatibleProvider,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
 import { LocalSandbox } from "../../../packages/sandbox/src/index.js";
+import type { LlmProvider } from "../../../packages/agent-core/src/index.js";
 
 const createJobSchema = z.object({
   task: z.string().min(3),
@@ -30,10 +32,11 @@ export async function buildApp(options: AppOptions) {
   const store = new InMemoryJobStore();
   const queue = new InMemoryJobQueue(2);
   const sandbox = new LocalSandbox({ rootDir: options.sandboxRoot });
+  const llm = createLlmProvider();
   const orchestrator = new AgentOrchestrator({
     store,
     sandbox,
-    llm: new DemoLlmProvider(),
+    llm,
     tools: defaultTools,
     maxSteps: options.maxSteps
   });
@@ -91,4 +94,16 @@ export async function buildApp(options: AppOptions) {
   });
 
   return app;
+}
+
+function createLlmProvider(): LlmProvider {
+  if (process.env.OPENAI_API_KEY) {
+    return new OpenAiCompatibleProvider({
+      apiKey: process.env.OPENAI_API_KEY,
+      baseUrl: process.env.OPENAI_BASE_URL,
+      model: process.env.OPENAI_MODEL
+    });
+  }
+
+  return new DemoLlmProvider();
 }
