@@ -1,0 +1,7 @@
+FROM node:20-bookworm-slim
+
+WORKDIR /workspace
+
+ENV HOME=/workspace
+
+CMD ["bash"]

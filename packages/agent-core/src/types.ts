@@ -85,6 +85,7 @@ export interface Sandbox {
   exec(jobId: string, command: SandboxCommand): Promise<SandboxResult>;
   writeFile(jobId: string, relativePath: string, content: string): Promise<void>;
   readFile(jobId: string, relativePath: string): Promise<string>;
+  importDirectory(jobId: string, sourcePath: string): Promise<void>;
 }
 
 export interface ToolContext {

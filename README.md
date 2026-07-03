@@ -46,6 +46,29 @@ Open job events:
 curl http://127.0.0.1:8080/jobs/<jobId>
 ```
 
+## Docker Sandbox Mode
+
+The default sandbox driver is `local`, which executes commands directly on the
+host inside a per-job workspace. To run each command in an isolated Docker
+container instead, build the sandbox image and start the API with the Docker
+driver:
+
+```bash
+docker build -f Dockerfile.sandbox -t cloud-agent-sandbox:latest .
+
+SANDBOX_DRIVER=docker \
+SANDBOX_IMAGE=cloud-agent-sandbox:latest \
+SANDBOX_NETWORK=none \
+SANDBOX_MEMORY=512m \
+SANDBOX_CPUS=1 \
+npm run dev
+```
+
+In Docker mode, every `shell.exec` call starts a short-lived container with the
+job workspace mounted at `/workspace`. Containers are removed after each
+command, while the per-job workspace remains on the host so later steps in the
+same job can see earlier file changes.
+
 ## Project Layout
 
 ```text
