@@ -5,16 +5,19 @@ loadEnvFile();
 
 const { buildApp } = await import("./app.js");
 
-const port = Number(process.env.PORT ?? 8080);
+const port = parsePositiveIntegerEnv("PORT", 8080);
 const sandboxRoot = resolve(process.env.SANDBOX_ROOT ?? "./workspace-runs");
-const sandboxDriver = process.env.SANDBOX_DRIVER === "docker" ? "docker" : "local";
+const sandboxDriver = parseSandboxDriver(process.env.SANDBOX_DRIVER);
 const sandboxImage = process.env.SANDBOX_IMAGE ?? "cloud-agent-sandbox:latest";
 const sandboxCpus = process.env.SANDBOX_CPUS;
 const sandboxMemory = process.env.SANDBOX_MEMORY;
 const sandboxNetwork = parseSandboxNetwork(process.env.SANDBOX_NETWORK);
-const sandboxTimeoutMs = process.env.SANDBOX_TIMEOUT_MS ? Number(process.env.SANDBOX_TIMEOUT_MS) : undefined;
-const maxSteps = Number(process.env.AGENT_MAX_STEPS ?? 8);
+const sandboxUser = process.env.SANDBOX_USER;
+const sandboxPidsLimit = parseOptionalPositiveIntegerEnv("SANDBOX_PIDS_LIMIT");
+const sandboxTimeoutMs = parseOptionalPositiveIntegerEnv("SANDBOX_TIMEOUT_MS");
+const maxSteps = parsePositiveIntegerEnv("AGENT_MAX_STEPS", 8);
 const defaultSourcePath = resolve(process.env.DEFAULT_SOURCE_PATH ?? process.cwd());
+const allowedSourceRoot = resolve(process.env.SANDBOX_SOURCE_ROOT ?? defaultSourcePath);
 
 const app = await buildApp({
   sandboxRoot,
@@ -23,16 +26,49 @@ const app = await buildApp({
   sandboxCpus,
   sandboxMemory,
   sandboxNetwork,
+  sandboxUser,
+  sandboxPidsLimit,
   sandboxTimeoutMs,
   maxSteps,
-  defaultSourcePath
+  defaultSourcePath,
+  allowedSourceRoot
 });
 
 await app.listen({ host: "127.0.0.1", port });
 
+function parseSandboxDriver(value: string | undefined): "local" | "docker" {
+  if (!value || value === "local") {
+    return "local";
+  }
+  if (value === "docker") {
+    return "docker";
+  }
+  throw new Error(`Invalid SANDBOX_DRIVER: ${value}`);
+}
+
 function parseSandboxNetwork(value: string | undefined): "none" | "bridge" | "host" | undefined {
+  if (!value) {
+    return undefined;
+  }
   if (value === "none" || value === "bridge" || value === "host") {
     return value;
   }
-  return undefined;
+  throw new Error(`Invalid SANDBOX_NETWORK: ${value}`);
+}
+
+function parsePositiveIntegerEnv(name: string, fallback: number): number {
+  return parsePositiveInteger(name, process.env[name] ?? String(fallback));
+}
+
+function parseOptionalPositiveIntegerEnv(name: string): number | undefined {
+  const value = process.env[name];
+  return value ? parsePositiveInteger(name, value) : undefined;
+}
+
+function parsePositiveInteger(name: string, value: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+  return parsed;
 }

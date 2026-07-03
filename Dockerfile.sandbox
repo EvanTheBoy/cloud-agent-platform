@@ -4,4 +4,6 @@ WORKDIR /workspace
 
 ENV HOME=/workspace
 
+USER node
+
 CMD ["bash"]
