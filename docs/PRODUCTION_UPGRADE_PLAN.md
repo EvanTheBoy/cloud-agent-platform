@@ -54,10 +54,8 @@ The BullMQ queue supports:
 
 ### Limitations
 
-- The API process still registers the BullMQ processor directly.
-- There is no separate worker entrypoint yet.
-- BullMQ mode should not be run as a multi-process worker fleet until API and
-  worker startup are split.
+- BullMQ processing now runs from a separate worker entrypoint.
+- API and worker startup are split for BullMQ/Postgres mode.
 - No dead-letter queue.
 - No priority support.
 - No delayed jobs.
@@ -87,8 +85,8 @@ Worker Process
 ### Implementation Tasks
 
 1. ~~Add `BullMqJobQueue implements JobQueue`.~~ Done.
-2. Move worker startup into a separate worker entrypoint, for example
-   `apps/worker/src/worker.ts`.
+2. ~~Move worker startup into a separate worker entrypoint, for example
+   `apps/worker/src/worker.ts`.~~ Done.
 3. ~~Keep `InMemoryJobQueue` for local demos and tests.~~ Done.
 4. ~~Add queue configuration.~~ Done:
 
@@ -123,7 +121,7 @@ The store interface supports:
 ### Limitations
 
 - In memory mode, job history is still lost on process restart.
-- Postgres mode provides durable state, but the API and worker are not split yet.
+- Postgres mode provides durable state for the split API and worker processes.
 - No tenant isolation.
 - Postgres has basic query indexes and a durable event log.
 - No artifact metadata.
@@ -370,9 +368,10 @@ This phase targets the assignment requirement around sandbox and isolation.
 
 ### Phase 2: Separate API And Worker
 
-- Add a worker entrypoint.
+- ~~Add a worker entrypoint.~~ Done.
 - ~~Add `BullMqJobQueue`.~~ Done.
-- ~~Use Redis for durable job dispatch.~~ Done within the current API process.
+- ~~Use Redis for durable job dispatch.~~ Done with separate API and worker
+  processes.
 - ~~Keep `InMemoryJobStore` if needed, but prefer moving to Postgres soon
   after.~~ Done.
 
@@ -452,8 +451,7 @@ The original highest-value upgrades were:
 Those are now implemented at a first production-oriented level. The highest
 value next changes are:
 
-1. Split API and worker processes.
-2. Add LLM diagnostics and broader observability.
-3. Add durable cancellation.
-4. Add artifact metadata and object storage.
-5. Add tenant/auth/quota controls.
+1. Add LLM diagnostics and broader observability.
+2. Add durable cancellation.
+3. Add artifact metadata and object storage.
+4. Add tenant/auth/quota controls.
