@@ -1,9 +1,15 @@
 import { EventEmitter } from "node:events";
 import { Queue, Worker } from "bullmq";
 import type { ConnectionOptions } from "bullmq";
-import type { JobHandler, JobQueue } from "./types.js";
+import { parseRedisConnection } from "./redis-connection.js";
+import type { JobHandler, JobHandlerResult, JobQueue, JobStatus } from "./types.js";
 
-export type QueueEventType = "queue.enqueued" | "queue.active" | "queue.completed" | "queue.failed";
+export type QueueEventType =
+  | "queue.enqueued"
+  | "queue.active"
+  | "queue.completed"
+  | "queue.attempt_failed"
+  | "queue.failed";
 
 export interface QueueEvent {
   type: QueueEventType;
@@ -25,22 +31,41 @@ export class InMemoryJobQueue implements JobQueue {
 
   async enqueue(jobId: string): Promise<void> {
     this.pending.push(jobId);
-    this.emitEvent({ type: "queue.enqueued", jobId });
+    await this.emitEvent({ type: "queue.enqueued", jobId });
     queueMicrotask(() => this.drain());
   }
 
   process(handler: JobHandler): void {
     this.events.on("job", (jobId: string) => {
-      this.emitEvent({ type: "queue.active", jobId });
-      void handler(jobId)
-        .then(() => {
-          this.emitEvent({ type: "queue.completed", jobId });
-        })
-        .catch((error: unknown) => {
-          this.emitEvent({
+      void (async () => {
+        await this.emitEvent({ type: "queue.active", jobId });
+        const result = await handler(jobId);
+        const finalStatus = getHandlerFinalStatus(result);
+        if (finalStatus === "failed") {
+          await this.emitEvent({
             type: "queue.failed",
             jobId,
-            payload: { error: error instanceof Error ? error.message : String(error) }
+            payload: {
+              failureKind: "business",
+              finalStatus,
+              error: getHandlerError(result)
+            }
+          });
+          return;
+        }
+        await this.emitEvent({
+          type: "queue.completed",
+          jobId,
+          payload: { finalStatus: finalStatus ?? "unknown" }
+        });
+      })()
+        .catch((error: unknown) => {
+          void this.emitEvent({
+            type: "queue.failed",
+            jobId,
+            payload: { failureKind: "processor", error: errorMessage(error) }
+          }).catch((emitError: unknown) => {
+            console.error("Failed to record in-memory queue failed event", emitError);
           });
         })
         .finally(() => {
@@ -62,8 +87,8 @@ export class InMemoryJobQueue implements JobQueue {
     }
   }
 
-  private emitEvent(event: QueueEvent): void {
-    void this.onEvent?.(event);
+  private async emitEvent(event: QueueEvent): Promise<void> {
+    await this.onEvent?.(event);
   }
 }
 
@@ -77,8 +102,8 @@ export interface BullMqJobQueueOptions {
 
 export class BullMqJobQueue implements JobQueue {
   private readonly connection: ConnectionOptions;
-  private readonly queue: Queue<{ jobId: string }>;
-  private worker?: Worker<{ jobId: string }>;
+  private readonly queue: Queue<{ jobId: string }, QueueHandlerResult>;
+  private worker?: Worker<{ jobId: string }, QueueHandlerResult>;
   private readonly maxAttempts: number;
   private readonly concurrency: number;
   private readonly onEvent?: QueueEventHandler;
@@ -86,8 +111,11 @@ export class BullMqJobQueue implements JobQueue {
   constructor(options: BullMqJobQueueOptions) {
     const queueName = options.queueName ?? "agent-jobs";
     this.connection = parseRedisConnection(options.redisUrl);
-    this.queue = new Queue(queueName, {
+    this.queue = new Queue<{ jobId: string }, QueueHandlerResult>(queueName, {
       connection: this.connection
+    });
+    this.queue.on("error", (error) => {
+      console.error("BullMQ queue error", error);
     });
     this.maxAttempts = options.maxAttempts ?? 3;
     this.concurrency = options.concurrency ?? 2;
@@ -109,7 +137,7 @@ export class BullMqJobQueue implements JobQueue {
         removeOnFail: false
       }
     );
-    this.emitEvent({
+    await this.emitEvent({
       type: "queue.enqueued",
       jobId,
       payload: { driver: "bullmq", maxAttempts: this.maxAttempts }
@@ -121,16 +149,20 @@ export class BullMqJobQueue implements JobQueue {
       throw new Error("BullMQ processor has already been registered");
     }
 
-    this.worker = new Worker<{ jobId: string }>(
+    this.worker = new Worker<{ jobId: string }, QueueHandlerResult>(
       this.queue.name,
       async (job) => {
         const jobId = job.data.jobId;
-        this.emitEvent({
+        await this.emitEvent({
           type: "queue.active",
           jobId,
           payload: { driver: "bullmq", attempt: job.attemptsMade + 1 }
         });
-        await handler(jobId);
+        const result = await handler(jobId);
+        return {
+          finalStatus: getHandlerFinalStatus(result),
+          error: getHandlerError(result)
+        };
       },
       {
         connection: this.connection,
@@ -138,23 +170,51 @@ export class BullMqJobQueue implements JobQueue {
       }
     );
 
+    this.worker.on("error", (error) => {
+      console.error("BullMQ worker error", error);
+    });
+
     this.worker.on("completed", (job) => {
-      this.emitEvent({
-        type: "queue.completed",
+      const finalStatus = job.returnvalue?.finalStatus;
+      const failed = finalStatus === "failed";
+      void this.emitEvent({
+        type: failed ? "queue.failed" : "queue.completed",
         jobId: job.data.jobId,
-        payload: { driver: "bullmq", attemptsMade: job.attemptsMade }
+        payload: {
+          driver: "bullmq",
+          attemptsMade: job.attemptsMade,
+          finalStatus: finalStatus ?? "unknown",
+          ...(failed
+            ? {
+                failureKind: "business",
+                error: job.returnvalue?.error
+              }
+            : {})
+        }
+      }).catch((error: unknown) => {
+        console.error("Failed to record BullMQ completed event", error);
       });
     });
 
     this.worker.on("failed", (job, error) => {
-      this.emitEvent({
-        type: "queue.failed",
+      const attemptsMade = job?.attemptsMade;
+      const maxAttempts = job?.opts.attempts ?? this.maxAttempts;
+      const willRetry =
+        typeof attemptsMade === "number" && typeof maxAttempts === "number" && attemptsMade < maxAttempts;
+
+      void this.emitEvent({
+        type: willRetry ? "queue.attempt_failed" : "queue.failed",
         jobId: job?.data.jobId ?? "unknown",
         payload: {
           driver: "bullmq",
-          attemptsMade: job?.attemptsMade,
+          attemptsMade,
+          maxAttempts,
+          willRetry,
+          failureKind: "processor",
           error: error.message
         }
+      }).catch((emitError: unknown) => {
+        console.error("Failed to record BullMQ failed event", emitError);
       });
     });
   }
@@ -164,25 +224,24 @@ export class BullMqJobQueue implements JobQueue {
     await this.queue.close();
   }
 
-  private emitEvent(event: QueueEvent): void {
-    void this.onEvent?.(event);
+  private async emitEvent(event: QueueEvent): Promise<void> {
+    await this.onEvent?.(event);
   }
 }
 
-function parseRedisConnection(redisUrl: string): ConnectionOptions {
-  const url = new URL(redisUrl);
-  const db = url.pathname && url.pathname !== "/" ? Number(url.pathname.slice(1)) : undefined;
-  if (db !== undefined && (!Number.isInteger(db) || db < 0)) {
-    throw new Error(`Invalid Redis database in REDIS_URL: ${url.pathname}`);
-  }
+interface QueueHandlerResult {
+  finalStatus?: JobStatus;
+  error?: string;
+}
 
-  return {
-    host: url.hostname,
-    port: url.port ? Number(url.port) : 6379,
-    username: url.username ? decodeURIComponent(url.username) : undefined,
-    password: url.password ? decodeURIComponent(url.password) : undefined,
-    db,
-    maxRetriesPerRequest: null,
-    ...(url.protocol === "rediss:" ? { tls: {} } : {})
-  };
+function getHandlerFinalStatus(result: JobHandlerResult): JobStatus | undefined {
+  return result && "status" in result ? result.status : undefined;
+}
+
+function getHandlerError(result: JobHandlerResult): string | undefined {
+  return result && "error" in result ? result.error : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

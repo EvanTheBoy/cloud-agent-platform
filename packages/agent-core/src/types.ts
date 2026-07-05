@@ -49,6 +49,7 @@ export type JobEventType =
   | "queue.enqueued"
   | "queue.active"
   | "queue.completed"
+  | "queue.attempt_failed"
   | "queue.failed";
 
 export interface JobEvent {
@@ -78,7 +79,9 @@ export interface JobQueue {
   close?(): Promise<void>;
 }
 
-export type JobHandler = (jobId: string) => Promise<void>;
+export type JobHandlerResult = { status?: JobStatus; error?: string } | void;
+
+export type JobHandler = (jobId: string) => Promise<JobHandlerResult>;
 
 export interface SandboxCommand {
   command: string;

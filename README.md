@@ -94,8 +94,11 @@ npm run dev
 
 BullMQ mode persists queued job dispatch in Redis and applies exponential
 backoff for processor errors. Job state is still stored by the configured
-`JobStore`; the current demo store is in-memory, so a separate worker process
-should be added together with a durable store such as Postgres.
+`JobStore`; the current demo store is in-memory. That means current BullMQ mode
+is for single-process local experiments only: do not run multiple API or worker
+instances, and do not treat Redis queue persistence as job recovery after an API
+process restart. A separate worker process should be added together with a
+durable store such as Postgres.
 
 For local development it is useful to keep completed and failed BullMQ job
 records in Redis for debugging. In long-running production environments, Redis

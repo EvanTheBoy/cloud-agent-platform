@@ -59,7 +59,7 @@ export async function buildApp(options: AppOptions) {
   });
 
   queue.process(async (jobId) => {
-    await orchestrator.run(jobId);
+    return orchestrator.run(jobId);
   });
 
   app.addHook("onClose", async () => {
@@ -123,7 +123,7 @@ export async function buildApp(options: AppOptions) {
 
 function createJobQueue(options: AppOptions, store: JobStore): JobQueue {
   const onEvent = async (event: {
-    type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.failed";
+    type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.attempt_failed" | "queue.failed";
     jobId: string;
     payload?: Record<string, unknown>;
   }) => {

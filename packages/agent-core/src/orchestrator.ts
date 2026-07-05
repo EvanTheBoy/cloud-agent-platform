@@ -1,4 +1,4 @@
-import type { AgentMessage, AgentStep, JobStore, LlmProvider, Sandbox, Tool } from "./types.js";
+import type { AgentJob, AgentMessage, AgentStep, JobStore, LlmProvider, Sandbox, Tool } from "./types.js";
 
 const now = () => new Date().toISOString();
 
@@ -19,7 +19,7 @@ export class AgentOrchestrator {
     this.toolsByName = new Map(options.tools.map((tool) => [tool.name, tool]));
   }
 
-  async run(jobId: string): Promise<void> {
+  async run(jobId: string): Promise<AgentJob> {
     let job = await this.options.store.get(jobId);
     if (!job) {
       throw new Error(`Job ${jobId} not found`);
@@ -96,7 +96,7 @@ export class AgentOrchestrator {
             timestamp: now(),
             payload: { status: job.status, result: job.result }
           });
-          return;
+          return job;
         }
       }
 
@@ -113,6 +113,7 @@ export class AgentOrchestrator {
         timestamp: now(),
         payload: { status: job.status, error: message }
       });
+      return job;
     }
   }
 }
