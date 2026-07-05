@@ -40,7 +40,17 @@ export interface AgentJob {
   updatedAt: string;
 }
 
-export type JobEventType = "job.created" | "job.updated" | "step.started" | "step.finished" | "job.finished";
+export type JobEventType =
+  | "job.created"
+  | "job.updated"
+  | "step.started"
+  | "step.finished"
+  | "job.finished"
+  | "queue.enqueued"
+  | "queue.active"
+  | "queue.completed"
+  | "queue.attempt_failed"
+  | "queue.failed";
 
 export interface JobEvent {
   type: JobEventType;
@@ -65,7 +75,13 @@ export interface JobStore {
 
 export interface JobQueue {
   enqueue(jobId: string): Promise<void>;
+  process(handler: JobHandler): void;
+  close?(): Promise<void>;
 }
+
+export type JobHandlerResult = { status?: JobStatus; error?: string } | void;
+
+export type JobHandler = (jobId: string) => Promise<JobHandlerResult>;
 
 export interface SandboxCommand {
   command: string;

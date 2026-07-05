@@ -76,6 +76,45 @@ available. Set `SANDBOX_USER` only when you intentionally need a fixed container
 user. Source imports are restricted to `SANDBOX_SOURCE_ROOT` and startup fails
 on invalid sandbox configuration values.
 
+## BullMQ Queue Mode
+
+The default queue driver is `memory`, which is useful for local demos and tests.
+To use Redis-backed BullMQ dispatch in the current API process, start Redis and
+run the API with the BullMQ driver:
+
+```bash
+brew services start redis
+
+QUEUE_DRIVER=bullmq \
+REDIS_URL=redis://127.0.0.1:6379 \
+JOB_CONCURRENCY=2 \
+JOB_MAX_ATTEMPTS=3 \
+npm run dev
+```
+
+BullMQ mode persists queued job dispatch in Redis and applies exponential
+backoff for processor errors. Job state is still stored by the configured
+`JobStore`; the current demo store is in-memory. That means current BullMQ mode
+is for single-process local experiments only: do not run multiple API or worker
+instances, and do not treat Redis queue persistence as job recovery after an API
+process restart. A separate worker process should be added together with a
+durable store such as Postgres.
+
+For local development it is useful to keep completed and failed BullMQ job
+records in Redis for debugging. In long-running production environments, Redis
+should not be treated as the permanent audit log. Prefer keeping durable job
+history in Postgres and configuring BullMQ retention by age/count, for example:
+
+```text
+QUEUE_REMOVE_ON_COMPLETE_AGE=3600
+QUEUE_REMOVE_ON_COMPLETE_COUNT=1000
+QUEUE_REMOVE_ON_FAIL_AGE=86400
+QUEUE_REMOVE_ON_FAIL_COUNT=5000
+```
+
+This keeps successful queue records for a shorter window and failed records
+longer for investigation, while preventing Redis from growing without bound.
+
 ## Project Layout
 
 ```text
@@ -90,7 +129,7 @@ examples              Example tasks and expected outputs
 ## Production Upgrade Path
 
 - Replace `InMemoryJobStore` with Postgres.
-- Replace `InMemoryJobQueue` with BullMQ/Redis or Temporal.
+- Use `BullMqJobQueue` with Redis for durable dispatch, then split API and worker once the store is durable.
 - Replace `LocalSandbox` with Docker, Kubernetes Jobs, or Firecracker.
 - Store workspace snapshots and artifacts in object storage.
 - Add auth, tenant quotas, audit logs, rate limits, and policy enforcement.

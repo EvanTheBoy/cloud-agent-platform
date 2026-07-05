@@ -15,6 +15,10 @@ const sandboxNetwork = parseSandboxNetwork(process.env.SANDBOX_NETWORK);
 const sandboxUser = process.env.SANDBOX_USER;
 const sandboxPidsLimit = parseOptionalPositiveIntegerEnv("SANDBOX_PIDS_LIMIT");
 const sandboxTimeoutMs = parseOptionalPositiveIntegerEnv("SANDBOX_TIMEOUT_MS");
+const queueDriver = parseQueueDriver(process.env.QUEUE_DRIVER);
+const redisUrl = process.env.REDIS_URL;
+const jobConcurrency = parsePositiveIntegerEnv("JOB_CONCURRENCY", 2);
+const jobMaxAttempts = parsePositiveIntegerEnv("JOB_MAX_ATTEMPTS", 3);
 const maxSteps = parsePositiveIntegerEnv("AGENT_MAX_STEPS", 8);
 const defaultSourcePath = resolve(process.env.DEFAULT_SOURCE_PATH ?? process.cwd());
 const allowedSourceRoot = resolve(process.env.SANDBOX_SOURCE_ROOT ?? defaultSourcePath);
@@ -29,6 +33,10 @@ const app = await buildApp({
   sandboxUser,
   sandboxPidsLimit,
   sandboxTimeoutMs,
+  queueDriver,
+  redisUrl,
+  jobConcurrency,
+  jobMaxAttempts,
   maxSteps,
   defaultSourcePath,
   allowedSourceRoot
@@ -44,6 +52,16 @@ function parseSandboxDriver(value: string | undefined): "local" | "docker" {
     return "docker";
   }
   throw new Error(`Invalid SANDBOX_DRIVER: ${value}`);
+}
+
+function parseQueueDriver(value: string | undefined): "memory" | "bullmq" {
+  if (!value || value === "memory") {
+    return "memory";
+  }
+  if (value === "bullmq") {
+    return "bullmq";
+  }
+  throw new Error(`Invalid QUEUE_DRIVER: ${value}`);
 }
 
 function parseSandboxNetwork(value: string | undefined): "none" | "bridge" | "host" | undefined {

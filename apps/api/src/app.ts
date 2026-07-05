@@ -6,15 +6,16 @@ import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import {
   AgentOrchestrator,
+  BullMqJobQueue,
   DemoLlmProvider,
   InMemoryJobQueue,
   InMemoryJobStore,
   OpenAiCompatibleProvider,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
-import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
-import type { LlmProvider } from "../../../packages/agent-core/src/index.js";
+import type { JobQueue, JobStore, LlmProvider } from "../../../packages/agent-core/src/index.js";
 import type { Sandbox } from "../../../packages/agent-core/src/types.js";
+import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
 
 const createJobSchema = z.object({
   task: z.string().min(3),
@@ -31,6 +32,10 @@ export interface AppOptions {
   sandboxUser?: string;
   sandboxPidsLimit?: number;
   sandboxTimeoutMs?: number;
+  queueDriver?: "memory" | "bullmq";
+  redisUrl?: string;
+  jobConcurrency?: number;
+  jobMaxAttempts?: number;
   maxSteps: number;
   defaultSourcePath?: string;
   allowedSourceRoot?: string;
@@ -42,7 +47,7 @@ export async function buildApp(options: AppOptions) {
   await app.register(websocket);
 
   const store = new InMemoryJobStore();
-  const queue = new InMemoryJobQueue(2);
+  const queue = createJobQueue(options, store);
   const sandbox = createSandbox(options);
   const llm = createLlmProvider();
   const orchestrator = new AgentOrchestrator({
@@ -54,7 +59,11 @@ export async function buildApp(options: AppOptions) {
   });
 
   queue.process(async (jobId) => {
-    await orchestrator.run(jobId);
+    return orchestrator.run(jobId);
+  });
+
+  app.addHook("onClose", async () => {
+    await queue.close?.();
   });
 
   app.get("/health", async () => ({ ok: true }));
@@ -110,6 +119,35 @@ export async function buildApp(options: AppOptions) {
   });
 
   return app;
+}
+
+function createJobQueue(options: AppOptions, store: JobStore): JobQueue {
+  const onEvent = async (event: {
+    type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.attempt_failed" | "queue.failed";
+    jobId: string;
+    payload?: Record<string, unknown>;
+  }) => {
+    await store.appendEvent({
+      type: event.type,
+      jobId: event.jobId,
+      timestamp: new Date().toISOString(),
+      payload: event.payload ?? {}
+    });
+  };
+
+  if (options.queueDriver === "bullmq") {
+    if (!options.redisUrl) {
+      throw new Error("REDIS_URL is required when QUEUE_DRIVER=bullmq");
+    }
+    return new BullMqJobQueue({
+      redisUrl: options.redisUrl,
+      concurrency: options.jobConcurrency,
+      maxAttempts: options.jobMaxAttempts,
+      onEvent
+    });
+  }
+
+  return new InMemoryJobQueue(options.jobConcurrency ?? 2, onEvent);
 }
 
 function createSandbox(options: AppOptions): Sandbox {
