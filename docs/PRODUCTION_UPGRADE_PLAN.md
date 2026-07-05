@@ -1,25 +1,29 @@
 # Production Upgrade Plan
 
-This project currently uses small local adapters so the agent platform can run as
-a compact demo. To move it toward a production-grade Cloud Agent Platform, the
-main upgrade areas are the job queue, job state storage, and sandbox runtime.
+This project started with small local adapters so the agent platform could run
+as a compact demo. Several production-oriented adapters now exist, but some
+operational pieces are still intentionally incomplete. The main remaining
+upgrade areas are worker separation, event streaming, observability,
+cancellation, artifact storage, and production controls.
 
 ## Current State
 
 ```text
 Fastify API
-  -> InMemoryJobStore
-  -> InMemoryJobQueue
+  -> InMemoryJobStore / PostgresJobStore
+  -> InMemoryJobQueue / BullMqJobQueue
   -> AgentOrchestrator
-  -> LocalSandbox
+  -> LocalSandbox / DockerSandbox
   -> LLM Provider
 ```
 
 The current design is useful because the boundaries are already interface-based:
 
-- `JobQueue` abstracts scheduling.
-- `JobStore` abstracts job state and events.
-- `Sandbox` abstracts isolated execution.
+- `JobQueue` abstracts scheduling. Current implementations: memory and BullMQ.
+- `JobStore` abstracts job state and events. Current implementations: memory and
+  Postgres.
+- `Sandbox` abstracts isolated execution. Current implementations: local
+  workspace and Docker.
 - `LlmProvider` abstracts model calls.
 - `Tool` abstracts agent capabilities.
 
@@ -30,26 +34,34 @@ interfaces, not rewrite the whole orchestrator.
 
 ### Current Implementation
 
-`InMemoryJobQueue` stores pending job IDs in a local array and uses an
-`EventEmitter` to dispatch work to the orchestrator.
+The project now has two queue drivers:
 
-It supports:
+- `InMemoryJobQueue` for local demos and tests.
+- `BullMqJobQueue` for Redis-backed dispatch.
+
+The memory queue supports:
 
 - FIFO scheduling.
 - Simple concurrency control.
 - Local development with no external services.
 
+The BullMQ queue supports:
+
+- Redis-backed job dispatch.
+- Configurable concurrency.
+- Retry attempts with exponential backoff.
+- Queue lifecycle events persisted through `JobStore`.
+
 ### Limitations
 
-- Jobs are lost when the process restarts.
-- Multiple API or worker processes cannot share the queue.
-- No retry policy.
-- No exponential backoff.
+- The API process still registers the BullMQ processor directly.
+- There is no separate worker entrypoint yet.
+- BullMQ mode should not be run as a multi-process worker fleet until API and
+  worker startup are split.
 - No dead-letter queue.
 - No priority support.
 - No delayed jobs.
-- No production observability.
-- No clean separation between API and worker processes.
+- Queue observability is event-based but not yet metrics/tracing-based.
 
 ### Target Implementation
 
@@ -74,11 +86,11 @@ Worker Process
 
 ### Implementation Tasks
 
-1. Add `BullMqJobQueue implements JobQueue`.
+1. ~~Add `BullMqJobQueue implements JobQueue`.~~ Done.
 2. Move worker startup into a separate worker entrypoint, for example
    `apps/worker/src/worker.ts`.
-3. Keep `InMemoryJobQueue` for local demos and tests.
-4. Add queue configuration:
+3. ~~Keep `InMemoryJobQueue` for local demos and tests.~~ Done.
+4. ~~Add queue configuration.~~ Done:
 
 ```text
 QUEUE_DRIVER=memory|bullmq
@@ -87,17 +99,20 @@ JOB_CONCURRENCY=2
 JOB_MAX_ATTEMPTS=3
 ```
 
-5. Add retry/backoff policy.
+5. ~~Add retry/backoff policy.~~ Done for processor failures.
 6. Add a dead-letter queue for permanently failed jobs.
-7. Record queue state transitions as job events.
+7. ~~Record queue state transitions as job events.~~ Done.
 
 ## 2. Job Store Upgrade
 
 ### Current Implementation
 
-The demo uses an in-memory store for jobs and events.
+The project now has two job store drivers:
 
-It supports:
+- `InMemoryJobStore` for local demos and tests.
+- `PostgresJobStore` for durable jobs and event history.
+
+The store interface supports:
 
 - Creating jobs.
 - Updating job status.
@@ -107,11 +122,10 @@ It supports:
 
 ### Limitations
 
-- Job history is lost on process restart.
-- No multi-process consistency.
+- In memory mode, job history is still lost on process restart.
+- Postgres mode provides durable state, but the API and worker are not split yet.
 - No tenant isolation.
-- No query indexes.
-- No durable audit log.
+- Postgres has basic query indexes and a durable event log.
 - No artifact metadata.
 - No cancellation state that survives restarts.
 
@@ -162,28 +176,46 @@ artifacts
 
 ### Implementation Tasks
 
-1. Add `PostgresJobStore implements JobStore`.
-2. Add database migrations.
-3. Keep `InMemoryJobStore` for demo mode.
-4. Add store configuration:
+1. ~~Add `PostgresJobStore implements JobStore`.~~ Done.
+2. ~~Add database migrations.~~ Done with
+   `migrations/001_postgres_job_store.sql`.
+3. ~~Keep `InMemoryJobStore` for demo mode.~~ Done.
+4. ~~Add store configuration.~~ Done:
 
 ```text
 STORE_DRIVER=memory|postgres
 DATABASE_URL=postgres://...
 ```
 
-5. Persist every job event before notifying WebSocket clients.
-6. Add indexes on `jobs.status`, `jobs.created_at`, and `job_events.job_id`.
+5. ~~Persist every job event before notifying WebSocket clients.~~ Done for the
+   current polling-based WebSocket endpoint.
+6. ~~Add indexes on `jobs.status`, `jobs.created_at`, and job event lookup.~~
+   Done.
 7. Add cancellation support with a durable status such as `cancel_requested`.
+
+### Current Gaps
+
+- Steps are stored as `jobs.steps_json` rather than normalized `job_steps`.
+  This is acceptable for the current aggregate read/write pattern, but
+  normalized steps are still useful for analytics and detailed audit queries.
+- Artifact metadata is not implemented.
+- Auto-running `CREATE TABLE IF NOT EXISTS` is acceptable for the demo, but
+  production should use explicit migration execution and schema compatibility
+  checks.
+- A gated Postgres integration test exists and runs when `DATABASE_URL` is set.
 
 ## 3. Sandbox Upgrade
 
 ### Current Implementation
 
-`LocalSandbox` creates one workspace directory per job and executes commands
-inside that directory.
+The project now has two sandbox drivers:
 
-It supports:
+- `LocalSandbox`, which creates one workspace directory per job and executes
+  commands on the host inside that directory.
+- `DockerSandbox`, which executes commands inside short-lived Docker
+  containers with the job workspace mounted at `/workspace`.
+
+The sandbox layer supports:
 
 - Per-job workspace directories.
 - Importing source code into the workspace.
@@ -192,13 +224,12 @@ It supports:
 
 ### Limitations
 
-- Commands still run on the host machine.
-- Filesystem isolation is only directory-based.
-- CPU and memory limits are weak or absent.
-- Network access is not strongly controlled.
-- A malicious command could affect the host environment.
-- Execution environment is not fully reproducible.
-- No container image boundary.
+- Local mode still runs commands on the host machine.
+- Docker mode improves isolation, but production policy and audit controls still
+  need to mature.
+- Network policy modes are still coarse.
+- Stale workspace/container cleanup is not automated.
+- Command audit data is not yet emitted as structured job events.
 
 ### Target Implementation
 
@@ -229,9 +260,9 @@ For stronger isolation later, consider:
 
 ### Implementation Tasks
 
-1. Add `DockerSandbox implements Sandbox`.
-2. Create a sandbox image, for example `Dockerfile.sandbox`.
-3. Add resource limits:
+1. ~~Add `DockerSandbox implements Sandbox`.~~ Done.
+2. ~~Create a sandbox image, for example `Dockerfile.sandbox`.~~ Done.
+3. ~~Add resource limit configuration.~~ Done:
 
 ```text
 SANDBOX_DRIVER=local|docker
@@ -242,8 +273,9 @@ SANDBOX_NETWORK=none
 SANDBOX_TIMEOUT_MS=120000
 ```
 
-4. Mount only the job workspace into the container.
-5. Avoid mounting host credentials, Docker socket, or project root directly.
+4. ~~Mount only the job workspace into the container.~~ Done.
+5. ~~Avoid mounting host credentials, Docker socket, or project root directly.~~
+   Done.
 6. Add network policy modes:
 
 ```text
@@ -287,32 +319,73 @@ API WebSocket Server
 This keeps the durable audit log in Postgres while Redis handles low-latency
 delivery.
 
-## 5. Suggested Upgrade Phases
+## 5. Observability Upgrade
+
+### Current Implementation
+
+The platform persists basic job, step, and queue events. Postgres mode makes
+those events durable. A separate observability plan now records the next
+diagnostics work in `docs/OBSERVABILITY_PLAN.md`.
+
+### Current Gaps
+
+- LLM provider failures do not include enough context to debug malformed tool
+  calls from persisted events alone.
+- Tool execution and sandbox command diagnostics are not yet structured as
+  first-class job events.
+- There are no metrics for latency, failure rate, queue depth, or Postgres pool
+  health.
+- There is no tracing across API, queue, worker, LLM, and sandbox boundaries.
+
+### Implementation Tasks
+
+1. Add LLM diagnostics events:
+
+```text
+llm.request.started
+llm.response.received
+llm.tool_arguments_parse_failed
+llm.request.failed
+```
+
+2. Ensure diagnostics never persist API keys, bearer tokens, cookies, or full
+   secret-bearing URLs.
+3. Add tool and sandbox diagnostics events.
+4. Add bounded previews for malformed model output and command output.
+5. Add metrics for job status, queue latency, LLM latency, tool latency,
+   sandbox failures, and Postgres pool/query health.
+6. Add tracing when API and worker processes are split.
+
+## 6. Suggested Upgrade Phases
 
 ### Phase 1: Make The Demo Credible
 
-- Keep the current in-memory queue and store.
-- Add `DockerSandbox`.
-- Improve docs and demo scripts.
+- ~~Keep the current in-memory queue and store.~~ Done.
+- ~~Add `DockerSandbox`.~~ Done.
+- Improve docs and demo scripts. Partially done.
 - Show that commands run inside a container instead of directly on the host.
+  Partially done.
 
 This phase targets the assignment requirement around sandbox and isolation.
 
 ### Phase 2: Separate API And Worker
 
 - Add a worker entrypoint.
-- Add `BullMqJobQueue`.
-- Use Redis for durable job dispatch.
-- Keep `InMemoryJobStore` if needed, but prefer moving to Postgres soon after.
+- ~~Add `BullMqJobQueue`.~~ Done.
+- ~~Use Redis for durable job dispatch.~~ Done within the current API process.
+- ~~Keep `InMemoryJobStore` if needed, but prefer moving to Postgres soon
+  after.~~ Done.
 
 This phase targets scheduling, concurrency, retries, and scalability.
 
 ### Phase 3: Durable State
 
-- Add `PostgresJobStore`.
-- Persist jobs, steps, events, and artifacts.
-- Add migrations and indexes.
-- Make job status survive restarts.
+- ~~Add `PostgresJobStore`.~~ Done.
+- Persist jobs, steps, events, and artifacts. Jobs, steps JSON, and events are
+  done; artifacts remain.
+- ~~Add migrations and indexes.~~ Done.
+- ~~Make job status survive restarts.~~ Done in Postgres mode and verified with
+  a real Postgres container.
 
 This phase targets production reliability and auditability.
 
@@ -326,7 +399,15 @@ This phase targets production reliability and auditability.
 - Add artifact scanning.
 - Add metrics and tracing.
 
-## 6. Final Target Architecture
+### Phase 5: Observability And Operations
+
+- Add LLM diagnostics events.
+- Add tool and sandbox diagnostics events.
+- Add metrics and tracing.
+- Add explicit migration commands.
+- Add operational runbooks for Redis, Postgres, worker, and sandbox failures.
+
+## 7. Final Target Architecture
 
 ```text
 Client / Web UI
@@ -362,13 +443,17 @@ Object Storage
 
 ## Recommendation
 
-For this project, the highest-value next changes are:
+The original highest-value upgrades were:
 
 1. Add `DockerSandbox`.
 2. Add `BullMqJobQueue`.
 3. Add `PostgresJobStore`.
 
-If only one production upgrade can be implemented, choose `DockerSandbox`,
-because sandbox isolation is one of the clearest requirements of the assignment
-and the current local-directory sandbox is the easiest part for reviewers to
-question.
+Those are now implemented at a first production-oriented level. The highest
+value next changes are:
+
+1. Split API and worker processes.
+2. Add LLM diagnostics and broader observability.
+3. Add durable cancellation.
+4. Add artifact metadata and object storage.
+5. Add tenant/auth/quota controls.
