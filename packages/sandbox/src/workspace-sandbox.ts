@@ -15,6 +15,25 @@ export abstract class WorkspaceSandbox implements Sandbox {
     return workspacePath;
   }
 
+  async validateWorkspace(jobId: string, expectedPath: string): Promise<void> {
+    const workspacePath = this.workspaceFor(jobId);
+    const resolvedExpectedPath = resolve(expectedPath);
+    if (resolvedExpectedPath !== workspacePath) {
+      throw new Error(
+        `Sandbox workspace path mismatch for job ${jobId}: expected ${resolvedExpectedPath}, configured ${workspacePath}`
+      );
+    }
+
+    try {
+      await realpath(workspacePath);
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        throw new Error(`Sandbox workspace is not accessible for job ${jobId}: ${workspacePath}`);
+      }
+      throw error;
+    }
+  }
+
   abstract exec(jobId: string, command: SandboxCommand): Promise<SandboxResult>;
 
   async writeFile(jobId: string, relativePath: string, content: string): Promise<void> {

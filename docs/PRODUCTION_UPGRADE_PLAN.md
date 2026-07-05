@@ -51,11 +51,15 @@ The BullMQ queue supports:
 - Configurable concurrency.
 - Retry attempts with exponential backoff.
 - Queue lifecycle events persisted through `JobStore`.
+- Failed enqueue attempts mark the already-created job as failed so durable
+  state does not leave orphan queued jobs.
 
 ### Limitations
 
 - BullMQ processing now runs from a separate worker entrypoint.
 - API and worker startup are split for BullMQ/Postgres mode.
+- API and worker must share the same sandbox workspace path; workers validate
+  the stored workspace path before running the agent.
 - No dead-letter queue.
 - No priority support.
 - No delayed jobs.

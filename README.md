@@ -112,6 +112,13 @@ job IDs, while `apps/worker/src/worker.ts` consumes the queue and runs the agent
 orchestrator. The worker requires `STORE_DRIVER=postgres` and
 `QUEUE_DRIVER=bullmq` so job state and events survive process restarts.
 
+The API and worker must also use the same shared sandbox workspace. In local
+development this usually means running both processes on the same host with the
+same absolute `SANDBOX_ROOT`. In containerized deployments, mount the same
+volume at the same path in both containers. The worker validates the stored
+workspace path before running the agent so a misconfigured worker fails the job
+instead of silently processing an empty workspace.
+
 For local development it is useful to keep completed and failed BullMQ job
 records in Redis for debugging. In long-running production environments, Redis
 should not be treated as the permanent audit log. Prefer keeping durable job

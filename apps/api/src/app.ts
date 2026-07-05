@@ -71,7 +71,26 @@ export async function buildApp(options: AppOptions) {
     const workspacePath = await sandbox.prepare(jobId);
     await sandbox.importDirectory(jobId, sourcePath);
     const job = await store.create({ id: jobId, task: parsed.task, workspacePath });
-    await queue.enqueue(job.id);
+    try {
+      await queue.enqueue(job.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failedJob = await store.update(job.id, {
+        status: "failed",
+        error: `Failed to enqueue job: ${message}`
+      });
+      await store.appendEvent({
+        type: "job.finished",
+        jobId: job.id,
+        timestamp: new Date().toISOString(),
+        payload: {
+          status: failedJob.status,
+          error: failedJob.error,
+          failureKind: "enqueue"
+        }
+      });
+      return reply.code(503).send({ error: "Failed to enqueue job", job: failedJob });
+    }
     return reply.code(202).send({ job });
   });
 
