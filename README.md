@@ -115,6 +115,28 @@ QUEUE_REMOVE_ON_FAIL_COUNT=5000
 This keeps successful queue records for a shorter window and failed records
 longer for investigation, while preventing Redis from growing without bound.
 
+## PostgreSQL Job Store Mode
+
+The default job store is `memory`, which is useful for local demos and tests.
+To persist jobs and event history across API process restarts, run the API with
+the Postgres store driver:
+
+```bash
+STORE_DRIVER=postgres \
+DATABASE_URL=postgres://user:password@127.0.0.1:5432/cloud_agent_platform \
+npm run dev
+```
+
+On startup, the Postgres store creates the required `jobs` and `job_events`
+tables if they do not already exist. The same schema is available in
+`migrations/001_postgres_job_store.sql` for environments that apply migrations
+outside the application process.
+
+Postgres mode persists job state, completed steps, results, errors, and the
+event stream used by the `/jobs/:jobId` and WebSocket endpoints. The in-memory
+store remains the default so the project can still run without external
+services.
+
 ## Project Layout
 
 ```text
@@ -124,6 +146,7 @@ packages/agent-core   Agent loop, tools, LLM provider interface, job state
 packages/sandbox      Isolated command execution primitives
 docs                  Architecture and submission notes
 examples              Example tasks and expected outputs
+migrations            SQL schema migrations for production backends
 ```
 
 ## Production Upgrade Path

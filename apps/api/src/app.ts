@@ -11,6 +11,7 @@ import {
   InMemoryJobQueue,
   InMemoryJobStore,
   OpenAiCompatibleProvider,
+  PostgresJobStore,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
 import type { JobQueue, JobStore, LlmProvider } from "../../../packages/agent-core/src/index.js";
@@ -34,6 +35,8 @@ export interface AppOptions {
   sandboxTimeoutMs?: number;
   queueDriver?: "memory" | "bullmq";
   redisUrl?: string;
+  storeDriver?: "memory" | "postgres";
+  databaseUrl?: string;
   jobConcurrency?: number;
   jobMaxAttempts?: number;
   maxSteps: number;
@@ -46,24 +49,39 @@ export async function buildApp(options: AppOptions) {
   await app.register(cors, { origin: true });
   await app.register(websocket);
 
-  const store = new InMemoryJobStore();
-  const queue = createJobQueue(options, store);
-  const sandbox = createSandbox(options);
-  const llm = createLlmProvider();
-  const orchestrator = new AgentOrchestrator({
-    store,
-    sandbox,
-    llm,
-    tools: defaultTools,
-    maxSteps: options.maxSteps
-  });
+  const store = await createJobStore(options);
+  let queue: JobQueue | undefined;
+  let sandbox: Sandbox | undefined;
 
-  queue.process(async (jobId) => {
-    return orchestrator.run(jobId);
-  });
+  try {
+    queue = createJobQueue(options, store);
+    sandbox = createSandbox(options);
+    const llm = createLlmProvider();
+    const orchestrator = new AgentOrchestrator({
+      store,
+      sandbox,
+      llm,
+      tools: defaultTools,
+      maxSteps: options.maxSteps
+    });
+
+    queue.process(async (jobId) => {
+      return orchestrator.run(jobId);
+    });
+  } catch (error) {
+    await queue?.close?.();
+    await store.close?.();
+    throw error;
+  }
+
+  if (!queue || !sandbox) {
+    await store.close?.();
+    throw new Error("Failed to initialize application resources");
+  }
 
   app.addHook("onClose", async () => {
     await queue.close?.();
+    await store.close?.();
   });
 
   app.get("/health", async () => ({ ok: true }));
@@ -119,6 +137,17 @@ export async function buildApp(options: AppOptions) {
   });
 
   return app;
+}
+
+async function createJobStore(options: AppOptions): Promise<JobStore> {
+  if (options.storeDriver === "postgres") {
+    if (!options.databaseUrl) {
+      throw new Error("DATABASE_URL is required when STORE_DRIVER=postgres");
+    }
+    return PostgresJobStore.create({ connectionString: options.databaseUrl });
+  }
+
+  return new InMemoryJobStore();
 }
 
 function createJobQueue(options: AppOptions, store: JobStore): JobQueue {

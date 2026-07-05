@@ -17,6 +17,8 @@ const sandboxPidsLimit = parseOptionalPositiveIntegerEnv("SANDBOX_PIDS_LIMIT");
 const sandboxTimeoutMs = parseOptionalPositiveIntegerEnv("SANDBOX_TIMEOUT_MS");
 const queueDriver = parseQueueDriver(process.env.QUEUE_DRIVER);
 const redisUrl = process.env.REDIS_URL;
+const storeDriver = parseStoreDriver(process.env.STORE_DRIVER);
+const databaseUrl = process.env.DATABASE_URL;
 const jobConcurrency = parsePositiveIntegerEnv("JOB_CONCURRENCY", 2);
 const jobMaxAttempts = parsePositiveIntegerEnv("JOB_MAX_ATTEMPTS", 3);
 const maxSteps = parsePositiveIntegerEnv("AGENT_MAX_STEPS", 8);
@@ -35,6 +37,8 @@ const app = await buildApp({
   sandboxTimeoutMs,
   queueDriver,
   redisUrl,
+  storeDriver,
+  databaseUrl,
   jobConcurrency,
   jobMaxAttempts,
   maxSteps,
@@ -62,6 +66,16 @@ function parseQueueDriver(value: string | undefined): "memory" | "bullmq" {
     return "bullmq";
   }
   throw new Error(`Invalid QUEUE_DRIVER: ${value}`);
+}
+
+function parseStoreDriver(value: string | undefined): "memory" | "postgres" {
+  if (!value || value === "memory") {
+    return "memory";
+  }
+  if (value === "postgres") {
+    return "postgres";
+  }
+  throw new Error(`Invalid STORE_DRIVER: ${value}`);
 }
 
 function parseSandboxNetwork(value: string | undefined): "none" | "bridge" | "host" | undefined {

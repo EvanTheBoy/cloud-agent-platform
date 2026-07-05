@@ -1,5 +1,6 @@
 export * from "./llm.js";
 export * from "./orchestrator.js";
+export * from "./postgres-store.js";
 export * from "./queue.js";
 export * from "./store.js";
 export * from "./tools.js";
