@@ -71,6 +71,7 @@ export interface JobStore {
   list(): Promise<AgentJob[]>;
   appendEvent(event: JobEvent): Promise<void>;
   getEvents(jobId: string): Promise<JobEvent[]>;
+  close?(): Promise<void>;
 }
 
 export interface JobQueue {
