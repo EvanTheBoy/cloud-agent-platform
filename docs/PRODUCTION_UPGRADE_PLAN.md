@@ -64,6 +64,7 @@ The BullMQ queue supports:
 - Redis-backed job dispatch.
 - Configurable concurrency.
 - Retry attempts with exponential backoff.
+- Configurable retention for completed and failed BullMQ job records.
 - Queue lifecycle events persisted through `JobStore`.
 - Failed enqueue attempts mark the already-created job as failed so durable
   state does not leave orphan queued jobs.
@@ -74,6 +75,10 @@ The BullMQ queue supports:
 - API and worker startup are split for BullMQ/Postgres mode.
 - API and worker must share the same sandbox workspace path; workers validate
   the stored workspace path before running the agent.
+- Queue event persistence is best-effort after the durable queue operation.
+  Missing lifecycle events, such as `queue.active`, must be diagnosed from
+  worker logs or future metrics rather than treated as proof that the job did
+  not run.
 - No dead-letter queue.
 - No priority support.
 - No delayed jobs.
@@ -113,6 +118,10 @@ QUEUE_DRIVER=memory|bullmq
 REDIS_URL=redis://localhost:6379
 JOB_CONCURRENCY=2
 JOB_MAX_ATTEMPTS=3
+QUEUE_REMOVE_ON_COMPLETE_AGE=3600
+QUEUE_REMOVE_ON_COMPLETE_COUNT=1000
+QUEUE_REMOVE_ON_FAIL_AGE=86400
+QUEUE_REMOVE_ON_FAIL_COUNT=5000
 ```
 
 5. ~~Add retry/backoff policy.~~ Done for processor failures.
@@ -283,7 +292,7 @@ For stronger isolation later, consider:
 ```text
 SANDBOX_DRIVER=local|docker
 SANDBOX_IMAGE=cloud-agent-sandbox:latest
-SANDBOX_CPU=1
+SANDBOX_CPUS=1
 SANDBOX_MEMORY=512m
 SANDBOX_NETWORK=none
 SANDBOX_TIMEOUT_MS=120000
