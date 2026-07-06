@@ -4,7 +4,8 @@ import Fastify from "fastify";
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { closeAgentRuntime, createAgentRuntime } from "./runtime.js";
+import { closeAgentRuntime, createApiRuntime, createWorkerRuntime } from "./runtime.js";
+import type { ApiRuntime, WorkerRuntime } from "./runtime.js";
 
 const createJobSchema = z.object({
   task: z.string().min(3),
@@ -27,6 +28,10 @@ export interface AppOptions {
   databaseUrl?: string;
   jobConcurrency?: number;
   jobMaxAttempts?: number;
+  queueRemoveOnCompleteAge?: number;
+  queueRemoveOnCompleteCount?: number;
+  queueRemoveOnFailAge?: number;
+  queueRemoveOnFailCount?: number;
   maxSteps: number;
   defaultSourcePath?: string;
   allowedSourceRoot?: string;
@@ -34,6 +39,10 @@ export interface AppOptions {
 }
 
 export async function buildApp(options: AppOptions) {
+  if (options.queueDriver === "bullmq" && options.processJobsInApi) {
+    throw new Error("BullMQ jobs must be processed by the separate worker process");
+  }
+
   if (options.queueDriver === "bullmq" && !options.processJobsInApi && options.storeDriver !== "postgres") {
     throw new Error("BullMQ API/worker mode requires STORE_DRIVER=postgres");
   }
@@ -42,10 +51,10 @@ export async function buildApp(options: AppOptions) {
   await app.register(cors, { origin: true });
   await app.register(websocket);
 
-  const runtime = await createAgentRuntime(options);
+  const runtime = options.processJobsInApi ? await createWorkerRuntime(options) : await createApiRuntime(options);
   const { store, queue, sandbox } = runtime;
 
-  if (options.processJobsInApi) {
+  if (isWorkerRuntime(runtime)) {
     queue.process(async (jobId) => {
       return runtime.orchestrator.run(jobId);
     });
@@ -127,6 +136,10 @@ export async function buildApp(options: AppOptions) {
   });
 
   return app;
+}
+
+function isWorkerRuntime(runtime: ApiRuntime | WorkerRuntime): runtime is WorkerRuntime {
+  return "orchestrator" in runtime;
 }
 
 async function resolveAllowedSourcePath(sourcePath: string, allowedRoot: string): Promise<string> {

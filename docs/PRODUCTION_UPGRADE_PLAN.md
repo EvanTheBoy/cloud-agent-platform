@@ -3,15 +3,29 @@
 This project started with small local adapters so the agent platform could run
 as a compact demo. Several production-oriented adapters now exist, but some
 operational pieces are still intentionally incomplete. The main remaining
-upgrade areas are worker separation, event streaming, observability,
-cancellation, artifact storage, and production controls.
+upgrade areas are event streaming, observability, cancellation, artifact
+storage, and production controls.
 
 ## Current State
 
 ```text
+Memory demo mode
+
 Fastify API
   -> InMemoryJobStore / PostgresJobStore
-  -> InMemoryJobQueue / BullMqJobQueue
+  -> InMemoryJobQueue
+  -> AgentOrchestrator
+  -> LocalSandbox / DockerSandbox
+  -> LLM Provider
+
+BullMQ/Postgres split mode
+
+Fastify API
+  -> PostgresJobStore
+  -> BullMqJobQueue enqueue
+
+Worker Process
+  -> BullMqJobQueue process
   -> AgentOrchestrator
   -> LocalSandbox / DockerSandbox
   -> LLM Provider

@@ -161,6 +161,24 @@ are themselves the audit log. Operational logs or metrics should still track:
 - Query duration.
 - Pool exhaustion.
 
+Queue lifecycle events such as `queue.enqueued` should be treated as
+best-effort observability after the durable queue operation succeeds. If
+BullMQ accepts a job but recording the corresponding job event fails, the
+enqueue operation should still be considered successful because the worker can
+already consume the job from Redis. The event persistence failure should be
+tracked separately instead of changing job status.
+
+Production follow-up options:
+
+- Event outbox: after `queue.add` succeeds, persist the intended job event to an
+  outbox and let a background worker retry writing it to `JobStore`.
+- Metrics and alerting: increment counters such as
+  `queue_event_persist_failed_total` when event recording fails.
+- Structured fallback logs: when `appendEvent` fails, write a structured log
+  that can be collected by the logging pipeline.
+- Store-level retry: let `appendEvent` retry short database failures before
+  surfacing the error.
+
 ## Sensitive Data Rules
 
 Never log:

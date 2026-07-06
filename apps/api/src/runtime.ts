@@ -13,30 +13,24 @@ import type { Sandbox } from "../../../packages/agent-core/src/types.js";
 import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
 import type { AppOptions } from "./app.js";
 
-export interface AgentRuntime {
+export interface ApiRuntime {
   store: JobStore;
   queue: JobQueue;
   sandbox: Sandbox;
+}
+
+export interface WorkerRuntime extends ApiRuntime {
   orchestrator: AgentOrchestrator;
 }
 
-export async function createAgentRuntime(options: AppOptions): Promise<AgentRuntime> {
+export async function createApiRuntime(options: AppOptions): Promise<ApiRuntime> {
   const store = await createJobStore(options);
   let queue: JobQueue | undefined;
 
   try {
     queue = createJobQueue(options, store);
     const sandbox = createSandbox(options);
-    const llm = createLlmProvider();
-    const orchestrator = new AgentOrchestrator({
-      store,
-      sandbox,
-      llm,
-      tools: defaultTools,
-      maxSteps: options.maxSteps
-    });
-
-    return { store, queue, sandbox, orchestrator };
+    return { store, queue, sandbox };
   } catch (error) {
     await queue?.close?.();
     await store.close?.();
@@ -44,7 +38,27 @@ export async function createAgentRuntime(options: AppOptions): Promise<AgentRunt
   }
 }
 
-export async function closeAgentRuntime(runtime: Pick<AgentRuntime, "queue" | "store">): Promise<void> {
+export async function createWorkerRuntime(options: AppOptions): Promise<WorkerRuntime> {
+  const runtime = await createApiRuntime(options);
+
+  try {
+    const llm = createLlmProvider();
+    const orchestrator = new AgentOrchestrator({
+      store: runtime.store,
+      sandbox: runtime.sandbox,
+      llm,
+      tools: defaultTools,
+      maxSteps: options.maxSteps
+    });
+
+    return { ...runtime, orchestrator };
+  } catch (error) {
+    await closeAgentRuntime(runtime);
+    throw error;
+  }
+}
+
+export async function closeAgentRuntime(runtime: Pick<ApiRuntime, "queue" | "store">): Promise<void> {
   await runtime.queue.close?.();
   await runtime.store.close?.();
 }
@@ -82,6 +96,8 @@ function createJobQueue(options: AppOptions, store: JobStore): JobQueue {
       redisUrl: options.redisUrl,
       concurrency: options.jobConcurrency,
       maxAttempts: options.jobMaxAttempts,
+      removeOnComplete: buildBullMqRetention(options.queueRemoveOnCompleteAge, options.queueRemoveOnCompleteCount),
+      removeOnFail: buildBullMqRetention(options.queueRemoveOnFailAge, options.queueRemoveOnFailCount),
       onEvent
     });
   }
@@ -116,4 +132,14 @@ function createLlmProvider(): LlmProvider {
   }
 
   return new DemoLlmProvider();
+}
+
+function buildBullMqRetention(age?: number, count?: number) {
+  if (age !== undefined) {
+    return count !== undefined ? { age, count } : { age };
+  }
+  if (count !== undefined) {
+    return { count };
+  }
+  return false;
 }

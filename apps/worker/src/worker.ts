@@ -1,6 +1,6 @@
 import { loadEnvFile } from "../../api/src/env.js";
 import { loadRuntimeConfig } from "../../api/src/config.js";
-import { closeAgentRuntime, createAgentRuntime } from "../../api/src/runtime.js";
+import { closeAgentRuntime, createWorkerRuntime } from "../../api/src/runtime.js";
 
 loadEnvFile();
 
@@ -14,7 +14,7 @@ if (config.storeDriver !== "postgres") {
   throw new Error("Worker process requires STORE_DRIVER=postgres");
 }
 
-const runtime = await createAgentRuntime(config);
+const runtime = await createWorkerRuntime(config);
 let closing = false;
 
 runtime.queue.process(async (jobId) => {

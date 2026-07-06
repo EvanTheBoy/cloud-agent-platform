@@ -30,6 +30,10 @@ export function loadRuntimeConfig(defaultSourcePath = resolve(process.env.DEFAUL
     databaseUrl: process.env.DATABASE_URL,
     jobConcurrency: parsePositiveIntegerEnv("JOB_CONCURRENCY", 2),
     jobMaxAttempts: parsePositiveIntegerEnv("JOB_MAX_ATTEMPTS", 3),
+    queueRemoveOnCompleteAge: parseOptionalPositiveIntegerEnv("QUEUE_REMOVE_ON_COMPLETE_AGE"),
+    queueRemoveOnCompleteCount: parseOptionalPositiveIntegerEnv("QUEUE_REMOVE_ON_COMPLETE_COUNT"),
+    queueRemoveOnFailAge: parseOptionalPositiveIntegerEnv("QUEUE_REMOVE_ON_FAIL_AGE"),
+    queueRemoveOnFailCount: parseOptionalPositiveIntegerEnv("QUEUE_REMOVE_ON_FAIL_COUNT"),
     maxSteps: parsePositiveIntegerEnv("AGENT_MAX_STEPS", 8),
     defaultSourcePath,
     allowedSourceRoot: resolve(process.env.SANDBOX_SOURCE_ROOT ?? defaultSourcePath)

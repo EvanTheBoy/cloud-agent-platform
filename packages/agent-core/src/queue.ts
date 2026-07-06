@@ -97,6 +97,8 @@ export interface BullMqJobQueueOptions {
   concurrency?: number;
   maxAttempts?: number;
   queueName?: string;
+  removeOnComplete?: BullMqJobRetention;
+  removeOnFail?: BullMqJobRetention;
   onEvent?: QueueEventHandler;
 }
 
@@ -106,6 +108,8 @@ export class BullMqJobQueue implements JobQueue {
   private worker?: Worker<{ jobId: string }, QueueHandlerResult>;
   private readonly maxAttempts: number;
   private readonly concurrency: number;
+  private readonly removeOnComplete: BullMqJobRetention;
+  private readonly removeOnFail: BullMqJobRetention;
   private readonly onEvent?: QueueEventHandler;
 
   constructor(options: BullMqJobQueueOptions) {
@@ -119,6 +123,8 @@ export class BullMqJobQueue implements JobQueue {
     });
     this.maxAttempts = options.maxAttempts ?? 3;
     this.concurrency = options.concurrency ?? 2;
+    this.removeOnComplete = options.removeOnComplete ?? false;
+    this.removeOnFail = options.removeOnFail ?? false;
     this.onEvent = options.onEvent;
   }
 
@@ -133,11 +139,11 @@ export class BullMqJobQueue implements JobQueue {
           type: "exponential",
           delay: 1_000
         },
-        removeOnComplete: false,
-        removeOnFail: false
+        removeOnComplete: this.removeOnComplete,
+        removeOnFail: this.removeOnFail
       }
     );
-    await this.emitEvent({
+    await this.emitEventSafely({
       type: "queue.enqueued",
       jobId,
       payload: { driver: "bullmq", maxAttempts: this.maxAttempts }
@@ -152,17 +158,7 @@ export class BullMqJobQueue implements JobQueue {
     this.worker = new Worker<{ jobId: string }, QueueHandlerResult>(
       this.queue.name,
       async (job) => {
-        const jobId = job.data.jobId;
-        await this.emitEvent({
-          type: "queue.active",
-          jobId,
-          payload: { driver: "bullmq", attempt: job.attemptsMade + 1 }
-        });
-        const result = await handler(jobId);
-        return {
-          finalStatus: getHandlerFinalStatus(result),
-          error: getHandlerError(result)
-        };
+        return this.processJob(job, handler);
       },
       {
         connection: this.connection,
@@ -227,12 +223,39 @@ export class BullMqJobQueue implements JobQueue {
   private async emitEvent(event: QueueEvent): Promise<void> {
     await this.onEvent?.(event);
   }
+
+  private async emitEventSafely(event: QueueEvent): Promise<void> {
+    try {
+      await this.emitEvent(event);
+    } catch (error) {
+      console.error("Failed to record BullMQ queue event", { event, error });
+    }
+  }
+
+  private async processJob(
+    job: { data: { jobId: string }; attemptsMade: number },
+    handler: JobHandler
+  ): Promise<QueueHandlerResult> {
+    const jobId = job.data.jobId;
+    await this.emitEventSafely({
+      type: "queue.active",
+      jobId,
+      payload: { driver: "bullmq", attempt: job.attemptsMade + 1 }
+    });
+    const result = await handler(jobId);
+    return {
+      finalStatus: getHandlerFinalStatus(result),
+      error: getHandlerError(result)
+    };
+  }
 }
 
 interface QueueHandlerResult {
   finalStatus?: JobStatus;
   error?: string;
 }
+
+export type BullMqJobRetention = false | { age: number; count?: number } | { count: number };
 
 function getHandlerFinalStatus(result: JobHandlerResult): JobStatus | undefined {
   return result && "status" in result ? result.status : undefined;
