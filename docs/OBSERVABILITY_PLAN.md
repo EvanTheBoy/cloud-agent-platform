@@ -168,14 +168,24 @@ enqueue operation should still be considered successful because the worker can
 already consume the job from Redis. The event persistence failure should be
 tracked separately instead of changing job status.
 
+The same best-effort rule applies to `queue.active`. If recording
+`queue.active` fails, the worker should still run the job. In that case the
+persisted event stream will not explicitly say that the `queue.active` write
+failed; the execution can only be inferred from later events such as
+`job.updated`, `step.started`, `queue.completed`, or `queue.failed`. Whether
+the missing `queue.active` event was an event persistence failure is only
+visible through worker fallback logs or metrics.
+
 Production follow-up options:
 
 - Event outbox: after `queue.add` succeeds, persist the intended job event to an
   outbox and let a background worker retry writing it to `JobStore`.
 - Metrics and alerting: increment counters such as
-  `queue_event_persist_failed_total` when event recording fails.
+  `queue_event_persist_failed_total{event="queue.active"}` when event recording
+  fails.
 - Structured fallback logs: when `appendEvent` fails, write a structured log
-  that can be collected by the logging pipeline.
+  that can be collected by the logging pipeline, including fields such as
+  `event`, `jobId`, `attempt`, and `error`.
 - Store-level retry: let `appendEvent` retry short database failures before
   surfacing the error.
 
