@@ -376,8 +376,10 @@ llm.request.failed
    secret-bearing URLs.~~
 3. ~~Add tool and sandbox diagnostics events.~~
 4. ~~Add bounded previews for malformed model output and command output.~~ Done
-   for malformed LLM tool arguments and command output metadata; full command
-   stdout/stderr are not duplicated in diagnostics events.
+   for malformed LLM tool arguments, command output metadata, persisted step
+   events, and final job result event payloads; previews are redacted,
+   diagnostic writes are best-effort, and full command stdout/stderr are not
+   duplicated in diagnostics events.
 5. Add metrics for job status, queue latency, LLM latency, tool latency,
    sandbox failures, and Postgres pool/query health.
 6. Add tracing when API and worker processes are split.
