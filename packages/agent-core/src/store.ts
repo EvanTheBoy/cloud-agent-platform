@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import type { AgentJob, CreateJobInput, JobEvent, JobStore } from "./types.js";
+import { jobEventPayload } from "./diagnostics.js";
 
 const now = () => new Date().toISOString();
 
@@ -24,7 +25,7 @@ export class InMemoryJobStore implements JobStore {
       type: "job.created",
       jobId: job.id,
       timestamp,
-      payload: { job }
+      payload: { job: jobEventPayload(job) }
     });
     return job;
   }
@@ -49,7 +50,7 @@ export class InMemoryJobStore implements JobStore {
       type: "job.updated",
       jobId: id,
       timestamp: updated.updatedAt,
-      payload: { job: updated }
+      payload: { job: jobEventPayload(updated) }
     });
     return updated;
   }

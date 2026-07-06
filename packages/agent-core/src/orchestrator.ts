@@ -8,11 +8,14 @@ import type {
   Sandbox,
   SandboxCommand,
   SandboxResult,
-  Tool
+  Tool,
+  ToolCall
 } from "./types.js";
+import { previewDiagnosticText, redactSensitiveText, sanitizeDiagnosticValue } from "./diagnostics.js";
 
 const now = () => new Date().toISOString();
 const OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n";
+const OBSERVATION_PREVIEW_LIMIT = 4000;
 
 export interface AgentOrchestratorOptions {
   store: JobStore;
@@ -52,7 +55,7 @@ export class AgentOrchestrator {
       for (let index = 0; index < this.maxSteps; index += 1) {
         const currentJobId = job.id;
         const response = await this.options.llm.complete(messages, [...this.toolsByName.values()], async (event) => {
-          await this.appendDiagnosticEvent(currentJobId, event.type, event.payload);
+          await this.safeAppendDiagnosticEvent(currentJobId, event.type, event.payload);
         });
         messages.push({ role: "assistant", content: response.message });
 
@@ -73,7 +76,7 @@ export class AgentOrchestrator {
           type: "step.started",
           jobId: job.id,
           timestamp: startedAt,
-          payload: { step }
+          payload: { step: sanitizeStepForPersistence(step) }
         });
 
         const tool = this.toolsByName.get(toolCall.name);
@@ -82,7 +85,7 @@ export class AgentOrchestrator {
         }
 
         const toolStartedAt = Date.now();
-        await this.appendDiagnosticEvent(job.id, "tool.started", {
+        await this.safeAppendDiagnosticEvent(job.id, "tool.started", {
           toolName: tool.name,
           inputPreview: previewToolInput(tool.name, toolCall.input)
         });
@@ -92,19 +95,19 @@ export class AgentOrchestrator {
           result = await tool.execute(toolCall.input, {
             job,
             sandbox: new DiagnosticSandbox(this.options.sandbox, async (type, payload) => {
-              await this.appendDiagnosticEvent(currentJobId, type, payload);
+              await this.safeAppendDiagnosticEvent(currentJobId, type, payload);
             })
           });
         } catch (error) {
-          await this.appendDiagnosticEvent(job.id, "tool.failed", {
+          await this.safeAppendDiagnosticEvent(job.id, "tool.failed", {
             toolName: tool.name,
             durationMs: Date.now() - toolStartedAt,
-            error: error instanceof Error ? error.message : String(error)
+            error: redactSensitiveText(error instanceof Error ? error.message : String(error))
           });
           throw error;
         }
 
-        await this.appendDiagnosticEvent(job.id, "tool.finished", {
+        await this.safeAppendDiagnosticEvent(job.id, "tool.finished", {
           toolName: tool.name,
           durationMs: Date.now() - toolStartedAt,
           observationBytes: Buffer.byteLength(result.observation, "utf8"),
@@ -116,10 +119,11 @@ export class AgentOrchestrator {
           observation: result.observation,
           finishedAt: now()
         };
+        const persistedStep = sanitizeStepForPersistence(finishedStep);
         messages.push({ role: "tool", content: result.observation });
 
         job = await this.options.store.update(job.id, {
-          steps: [...job.steps, finishedStep],
+          steps: [...job.steps, persistedStep],
           result: result.final ?? job.result
         });
 
@@ -127,7 +131,7 @@ export class AgentOrchestrator {
           type: "step.finished",
           jobId: job.id,
           timestamp: finishedStep.finishedAt ?? now(),
-          payload: { step: finishedStep }
+          payload: { step: persistedStep }
         });
 
         if (result.final) {
@@ -139,7 +143,11 @@ export class AgentOrchestrator {
             type: "job.finished",
             jobId: job.id,
             timestamp: now(),
-            payload: { status: job.status, result: job.result }
+            payload: {
+              status: job.status,
+              resultPreview: previewDiagnosticText(result.final, 4000),
+              resultBytes: Buffer.byteLength(result.final, "utf8")
+            }
           });
           return job;
         }
@@ -156,19 +164,31 @@ export class AgentOrchestrator {
         type: "job.finished",
         jobId: job.id,
         timestamp: now(),
-        payload: { status: job.status, error: message }
+        payload: {
+          status: job.status,
+          errorPreview: previewDiagnosticText(message, 4000),
+          errorBytes: Buffer.byteLength(message, "utf8")
+        }
       });
       return job;
     }
   }
 
-  private async appendDiagnosticEvent(jobId: string, type: JobEventType, payload: Record<string, unknown>): Promise<void> {
-    await this.options.store.appendEvent({
-      type,
-      jobId,
-      timestamp: now(),
-      payload
-    });
+  private async safeAppendDiagnosticEvent(jobId: string, type: JobEventType, payload: Record<string, unknown>): Promise<void> {
+    try {
+      await this.options.store.appendEvent({
+        type,
+        jobId,
+        timestamp: now(),
+        payload
+      });
+    } catch (error) {
+      console.warn("Failed to append diagnostic event", {
+        jobId,
+        type,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 }
 
@@ -190,37 +210,39 @@ class DiagnosticSandbox implements Sandbox {
 
   async exec(jobId: string, command: SandboxCommand): Promise<SandboxResult> {
     const startedAt = Date.now();
-    const timeoutMs = command.timeoutMs ?? 30_000;
+    const requestedTimeoutMs = command.timeoutMs;
     await this.appendDiagnosticEvent("sandbox.command.started", {
       command: command.command,
       argsCount: command.args?.length ?? 0,
-      timeoutMs
+      requestedTimeoutMs
     });
 
+    let result: SandboxResult;
     try {
-      const result = await this.inner.exec(jobId, command);
-      await this.appendDiagnosticEvent("sandbox.command.finished", {
-        command: command.command,
-        argsCount: command.args?.length ?? 0,
-        timeoutMs,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        stdoutBytes: Buffer.byteLength(result.stdout, "utf8"),
-        stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
-        stdoutTruncated: result.stdout.includes(OUTPUT_TRUNCATED_MARKER),
-        stderrTruncated: result.stderr.includes(OUTPUT_TRUNCATED_MARKER)
-      });
-      return result;
+      result = await this.inner.exec(jobId, command);
     } catch (error) {
       await this.appendDiagnosticEvent("sandbox.command.failed", {
         command: command.command,
         argsCount: command.args?.length ?? 0,
-        timeoutMs,
+        requestedTimeoutMs,
         durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error)
+        error: redactSensitiveText(error instanceof Error ? error.message : String(error))
       });
       throw error;
     }
+
+    await this.appendDiagnosticEvent("sandbox.command.finished", {
+      command: command.command,
+      argsCount: command.args?.length ?? 0,
+      requestedTimeoutMs,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      stdoutBytes: Buffer.byteLength(result.stdout, "utf8"),
+      stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
+      stdoutTruncated: result.stdout.includes(OUTPUT_TRUNCATED_MARKER),
+      stderrTruncated: result.stderr.includes(OUTPUT_TRUNCATED_MARKER)
+    });
+    return result;
   }
 
   async writeFile(jobId: string, relativePath: string, content: string): Promise<void> {
@@ -239,47 +261,26 @@ class DiagnosticSandbox implements Sandbox {
 function previewToolInput(toolName: string, input: Record<string, unknown>): Record<string, unknown> {
   if (toolName === "shell.exec") {
     return {
-      command: typeof input.command === "string" ? truncate(input.command, 200) : undefined,
+      command: typeof input.command === "string" ? previewDiagnosticText(input.command, 200) : undefined,
       argsCount: Array.isArray(input.args) ? input.args.length : 0,
-      timeoutMs: typeof input.timeoutMs === "number" ? input.timeoutMs : undefined
+      requestedTimeoutMs: typeof input.timeoutMs === "number" ? input.timeoutMs : undefined
     };
   }
 
-  return sanitizeDiagnosticValue(input, 0) as Record<string, unknown>;
+  return sanitizeDiagnosticValue(input) as Record<string, unknown>;
 }
 
-function sanitizeDiagnosticValue(value: unknown, depth: number): unknown {
-  if (depth > 3) {
-    return "[max depth]";
-  }
-
-  if (typeof value === "string") {
-    return truncate(value, 500);
-  }
-
-  if (typeof value === "number" || typeof value === "boolean" || value === null) {
-    return value;
-  }
-
-  if (Array.isArray(value)) {
-    return value.slice(0, 20).map((item) => sanitizeDiagnosticValue(item, depth + 1));
-  }
-
-  if (typeof value === "object" && value) {
-    const output: Record<string, unknown> = {};
-    for (const [key, item] of Object.entries(value).slice(0, 20)) {
-      output[key] = isSensitiveKey(key) ? "[redacted]" : sanitizeDiagnosticValue(item, depth + 1);
-    }
-    return output;
-  }
-
-  return String(value);
+function sanitizeStepForPersistence(step: AgentStep): AgentStep {
+  return {
+    ...step,
+    toolCall: step.toolCall ? sanitizeToolCallForPersistence(step.toolCall) : undefined,
+    observation: step.observation ? previewDiagnosticText(step.observation, OBSERVATION_PREVIEW_LIMIT) : undefined
+  };
 }
 
-function isSensitiveKey(key: string): boolean {
-  return /api[_-]?key|authorization|bearer|cookie|password|secret|token/i.test(key);
-}
-
-function truncate(value: string, limit: number): string {
-  return value.length > limit ? `${value.slice(0, limit)}...[truncated]` : value;
+function sanitizeToolCallForPersistence(toolCall: ToolCall): ToolCall {
+  return {
+    ...toolCall,
+    input: previewToolInput(toolCall.name, toolCall.input)
+  };
 }

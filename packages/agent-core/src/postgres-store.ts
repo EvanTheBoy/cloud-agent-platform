@@ -1,6 +1,7 @@
 import { nanoid } from "nanoid";
 import pg from "pg";
 import type { AgentJob, AgentStep, CreateJobInput, JobEvent, JobEventType, JobStatus, JobStore } from "./types.js";
+import { jobEventPayload } from "./diagnostics.js";
 
 const { Pool } = pg;
 
@@ -98,7 +99,7 @@ export class PostgresJobStore implements JobStore {
         type: "job.created",
         jobId: job.id,
         timestamp,
-        payload: { job }
+        payload: { job: jobEventPayload(job) }
       });
       await client.query("COMMIT");
     } catch (error) {
@@ -162,7 +163,7 @@ export class PostgresJobStore implements JobStore {
         type: "job.updated",
         jobId: id,
         timestamp: updated.updatedAt,
-        payload: { job: updated }
+        payload: { job: jobEventPayload(updated) }
       });
       await client.query("COMMIT");
       return updated;
