@@ -24,13 +24,57 @@ is set, it uses the OpenAI-compatible chat-completions provider configured by
 `OPENAI_BASE_URL` and `OPENAI_MODEL`; otherwise it falls back to the local demo
 provider.
 
-Create a job:
+Create a job in another terminal:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/jobs \
   -H "content-type: application/json" \
   -d '{"task":"Read this workspace, find TODO comments, and produce a report."}'
 ```
+
+The API returns `202 Accepted` with a queued job. That means the job was
+created and accepted for processing; it does not mean the agent has finished
+yet. Copy the returned `job.id`, then query the job until `status` becomes
+`succeeded` or `failed`:
+
+```bash
+curl http://127.0.0.1:8080/jobs/<jobId>
+```
+
+A successful run looks like this at the top level:
+
+```json
+{
+  "job": {
+    "id": "<jobId>",
+    "status": "succeeded",
+    "steps": [
+      {
+        "toolCall": {
+          "name": "shell.exec"
+        }
+      }
+    ],
+    "result": "..."
+  },
+  "events": [
+    { "type": "job.created" },
+    { "type": "queue.enqueued" },
+    { "type": "queue.active" },
+    { "type": "step.started" },
+    { "type": "step.finished" },
+    { "type": "job.finished" },
+    { "type": "queue.completed" }
+  ]
+}
+```
+
+The important checks are:
+
+- `job.status` is `succeeded`.
+- `job.steps` contains one or more tool calls such as `shell.exec`.
+- `job.result` contains the final agent output.
+- `events` shows the lifecycle from creation through queue completion.
 
 For local demos the API copies `DEFAULT_SOURCE_PATH` into the job sandbox, excluding `node_modules`, `dist`, `.git`, and prior `workspace-runs`. You can override it per request:
 
@@ -40,10 +84,10 @@ curl -X POST http://127.0.0.1:8080/jobs \
   -d '{"task":"Find TODO comments.","sourcePath":"/path/to/repo"}'
 ```
 
-Open job events:
+You can also watch job events over WebSocket:
 
 ```bash
-curl http://127.0.0.1:8080/jobs/<jobId>
+node -e 'const ws = new WebSocket("ws://127.0.0.1:8080/jobs/<jobId>/events"); ws.onmessage = (event) => console.log(event.data);'
 ```
 
 ## Docker Sandbox Mode
@@ -79,16 +123,38 @@ on invalid sandbox configuration values.
 ## BullMQ Queue Mode
 
 The default queue driver is `memory`, which is useful for local demos and tests.
-To use Redis-backed BullMQ dispatch with a separate worker process, start Redis
-and run both the API and worker with the BullMQ driver:
+To use Redis-backed BullMQ dispatch with a separate worker process, run Redis,
+Postgres, the API, and the worker. For a disposable local test, Redis and
+Postgres can both run in Docker.
+
+Start Redis and Postgres:
 
 ```bash
-brew services start redis
+docker run --name cap-redis \
+  -p 6379:6379 \
+  -d redis:7
 
+docker run --name cap-postgres \
+  -e POSTGRES_USER=cap \
+  -e POSTGRES_PASSWORD=cap \
+  -e POSTGRES_DB=cloud_agent_platform \
+  -p 5432:5432 \
+  -d postgres:16
+
+docker exec cap-redis redis-cli ping
+```
+
+`docker exec cap-redis redis-cli ping` should print `PONG`.
+
+In one terminal, start the API:
+
+```bash
+OPENAI_API_KEY= \
 STORE_DRIVER=postgres \
-DATABASE_URL=postgres://user:password@127.0.0.1:5432/cloud_agent_platform \
+DATABASE_URL=postgres://cap:cap@127.0.0.1:5432/cloud_agent_platform \
 QUEUE_DRIVER=bullmq \
 REDIS_URL=redis://127.0.0.1:6379 \
+SANDBOX_ROOT="$(pwd)/workspace-runs" \
 JOB_CONCURRENCY=2 \
 JOB_MAX_ATTEMPTS=3 \
 npm run dev:api
@@ -97,14 +163,40 @@ npm run dev:api
 In a second terminal, start the worker:
 
 ```bash
+OPENAI_API_KEY= \
 STORE_DRIVER=postgres \
-DATABASE_URL=postgres://user:password@127.0.0.1:5432/cloud_agent_platform \
+DATABASE_URL=postgres://cap:cap@127.0.0.1:5432/cloud_agent_platform \
 QUEUE_DRIVER=bullmq \
 REDIS_URL=redis://127.0.0.1:6379 \
+SANDBOX_ROOT="$(pwd)/workspace-runs" \
 JOB_CONCURRENCY=2 \
 JOB_MAX_ATTEMPTS=3 \
 npm run dev:worker
 ```
+
+In a third terminal, submit and query a job:
+
+```bash
+curl -X POST http://127.0.0.1:8080/jobs \
+  -H "content-type: application/json" \
+  -d '{"task":"Read this repository, find all TODO comments, and generate a concise report grouped by file."}'
+
+curl http://127.0.0.1:8080/jobs/<jobId>
+```
+
+The successful BullMQ path is confirmed when the queried job has
+`"status":"succeeded"` and queue events include BullMQ payloads such as:
+
+```json
+{ "type": "queue.enqueued", "payload": { "driver": "bullmq" } }
+{ "type": "queue.active", "payload": { "driver": "bullmq" } }
+{ "type": "queue.completed", "payload": { "driver": "bullmq", "finalStatus": "succeeded" } }
+```
+
+`OPENAI_API_KEY=` intentionally clears any `.env` API key for this deterministic
+test, causing the worker to use the built-in demo LLM provider. To test a real
+OpenAI-compatible endpoint instead, remove that override and configure
+`OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
 
 BullMQ mode persists queued job dispatch in Redis and applies exponential
 backoff for processor errors. In BullMQ mode, the API creates jobs and enqueues
@@ -133,6 +225,12 @@ QUEUE_REMOVE_ON_FAIL_COUNT=5000
 
 This keeps successful queue records for a shorter window and failed records
 longer for investigation, while preventing Redis from growing without bound.
+
+Remove the disposable Redis and Postgres containers after testing:
+
+```bash
+docker rm -f cap-redis cap-postgres
+```
 
 ## PostgreSQL Job Store Mode
 
