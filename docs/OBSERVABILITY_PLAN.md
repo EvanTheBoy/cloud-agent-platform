@@ -37,11 +37,17 @@ The platform currently records:
 - Job creation and updates.
 - Queue lifecycle events.
 - Step started and finished events.
+- OpenAI-compatible LLM request, response, request failure, and malformed
+  tool-argument diagnostics.
+- Tool execution start, finish, and failure diagnostics.
+- Sandbox command start, finish, and failure diagnostics with output byte counts
+  and truncation flags.
 - Final job status and error message.
 - Durable event history in Postgres when `STORE_DRIVER=postgres`.
 
-This is enough to see that a job failed, but not always enough to know why a
-provider, model, tool call, sandbox command, or event stream failed.
+This is enough to see that a job failed and to diagnose malformed
+OpenAI-compatible tool-call arguments, thrown tool errors, and sandbox command
+execution behavior. Metrics and tracing diagnostics are still incomplete.
 
 ## Observability Goals
 
@@ -117,7 +123,8 @@ Suggested payloads:
   "toolName": "shell.exec",
   "inputPreview": {
     "command": "sh",
-    "args": ["-lc", "find . -type f"]
+    "argsCount": 2,
+    "timeoutMs": 30000
   }
 }
 ```
@@ -125,18 +132,15 @@ Suggested payloads:
 ```json
 {
   "toolName": "shell.exec",
-  "exitCode": 0,
   "durationMs": 125,
-  "stdoutBytes": 2048,
-  "stderrBytes": 0
+  "observationBytes": 2200,
+  "final": false
 }
 ```
 
 ### Sandbox Events
 
 ```text
-sandbox.prepare.started
-sandbox.prepare.finished
 sandbox.command.started
 sandbox.command.finished
 sandbox.command.failed
@@ -227,7 +231,10 @@ payloads.
 
 ### Phase 1: LLM Diagnostics
 
-1. Extend `JobEventType` with:
+Status: implemented for OpenAI-compatible request lifecycle events and
+malformed tool-call argument parsing.
+
+1. ~~Extend `JobEventType` with:~~
 
 ```text
 llm.request.started
@@ -236,7 +243,7 @@ llm.tool_arguments_parse_failed
 llm.request.failed
 ```
 
-2. Give the LLM provider a diagnostics callback, for example:
+2. ~~Give the LLM provider a diagnostics callback, for example:~~
 
 ```ts
 type LlmDiagnostics = (event: {
@@ -245,8 +252,8 @@ type LlmDiagnostics = (event: {
 }) => Promise<void>;
 ```
 
-3. Wire the orchestrator so diagnostics events include the current `jobId`.
-4. On `JSON.parse` failure for tool arguments, record:
+3. ~~Wire the orchestrator so diagnostics events include the current `jobId`.~~
+4. ~~On `JSON.parse` failure for tool arguments, record:~~
    - provider
    - model
    - base URL host
@@ -254,14 +261,17 @@ type LlmDiagnostics = (event: {
    - raw argument preview
    - raw argument length
    - parse error
-5. Keep throwing the original failure so job status still becomes `failed`.
+5. ~~Keep throwing the original failure so job status still becomes `failed`.~~
 
 ### Phase 2: Tool And Sandbox Diagnostics
 
-1. Emit tool start/finish/failure events around tool execution.
-2. Emit sandbox command start/finish/failure events around command execution.
-3. Record output sizes and truncation status.
-4. Avoid duplicating full stdout/stderr in multiple event payloads.
+Status: implemented for orchestrator-managed tool execution and sandbox
+commands made through `sandbox.exec`.
+
+1. ~~Emit tool start/finish/failure events around tool execution.~~
+2. ~~Emit sandbox command start/finish/failure events around command execution.~~
+3. ~~Record output sizes and truncation status.~~
+4. ~~Avoid duplicating full stdout/stderr in multiple event payloads.~~
 
 ### Phase 3: Metrics And Tracing
 
@@ -293,6 +303,8 @@ No persisted event should expose API keys or authorization secrets.
 
 ## Current Follow-Up
 
-The immediate next observability task is to add LLM diagnostics for
-OpenAI-compatible tool-call parsing failures. This will turn the current
-inference-based debugging process into event-based debugging.
+The immediate next observability task is Phase 3: process-level metrics for job
+status, LLM latency, tool latency, sandbox command duration/failures, queue
+latency, and Postgres pool/query health. Distributed tracing across API, queue,
+worker, LLM, and sandbox boundaries should follow once those metrics are in
+place.
