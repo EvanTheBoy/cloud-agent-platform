@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { InMemoryJobQueue } from "../../packages/agent-core/src/queue.js";
+import { BullMqJobQueue, InMemoryJobQueue } from "../../packages/agent-core/src/queue.js";
 import { parseRedisConnection } from "../../packages/agent-core/src/redis-connection.js";
 import type { QueueEvent } from "../../packages/agent-core/src/queue.js";
+import type { JobHandler, JobHandlerResult } from "../../packages/agent-core/src/types.js";
 
 describe("InMemoryJobQueue", () => {
   it("records business failures as queue.failed instead of queue.completed", async () => {
@@ -65,6 +66,80 @@ describe("parseRedisConnection", () => {
     assert.throws(() => parseRedisConnection("redis:///0"), /host/);
     assert.throws(() => parseRedisConnection("redis://127.0.0.1:0"), /port/);
     assert.throws(() => parseRedisConnection("redis://127.0.0.1:6379/not-a-db"), /database/);
+  });
+});
+
+describe("BullMqJobQueue", () => {
+  it("runs the handler when recording queue.active fails", async () => {
+    const queue = Object.create(BullMqJobQueue.prototype) as unknown as {
+      emitEvent: () => Promise<void>;
+      processJob: (
+        job: { data: { jobId: string }; attemptsMade: number },
+        handler: JobHandler
+      ) => Promise<JobHandlerResult>;
+    };
+    const originalConsoleError = console.error;
+    let handledJobId: string | undefined;
+    queue.emitEvent = async () => {
+      throw new Error("store unavailable");
+    };
+
+    let result: JobHandlerResult;
+    try {
+      console.error = () => {};
+      result = await queue.processJob({ data: { jobId: "job-1" }, attemptsMade: 0 }, async (jobId) => {
+        handledJobId = jobId;
+        return { status: "succeeded" };
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    assert.equal(handledJobId, "job-1");
+    assert.deepEqual(result, { finalStatus: "succeeded", error: undefined });
+  });
+
+  it("does not fail enqueue after Redis add succeeds when recording queue.enqueued fails", async () => {
+    const queue = Object.create(BullMqJobQueue.prototype) as unknown as {
+      queue: { add: (...args: unknown[]) => Promise<void> };
+      maxAttempts: number;
+      removeOnComplete: false | { age: number; count?: number } | { count: number };
+      removeOnFail: false | { age: number; count?: number } | { count: number };
+      emitEvent: () => Promise<void>;
+      enqueue: BullMqJobQueue["enqueue"];
+    };
+    const calls: unknown[][] = [];
+    const originalConsoleError = console.error;
+    queue.queue = {
+      add: async (...args: unknown[]) => {
+        calls.push(args);
+      }
+    };
+    queue.maxAttempts = 3;
+    queue.removeOnComplete = { age: 3600, count: 1000 };
+    queue.removeOnFail = { age: 86400, count: 5000 };
+    queue.emitEvent = async () => {
+      throw new Error("store unavailable");
+    };
+
+    try {
+      console.error = () => {};
+      await queue.enqueue("job-1");
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0]?.[2], {
+      jobId: "job-1",
+      attempts: 3,
+      backoff: {
+        type: "exponential",
+        delay: 1_000
+      },
+      removeOnComplete: { age: 3600, count: 1000 },
+      removeOnFail: { age: 86400, count: 5000 }
+    });
   });
 });
 

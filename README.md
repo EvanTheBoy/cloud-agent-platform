@@ -79,26 +79,45 @@ on invalid sandbox configuration values.
 ## BullMQ Queue Mode
 
 The default queue driver is `memory`, which is useful for local demos and tests.
-To use Redis-backed BullMQ dispatch in the current API process, start Redis and
-run the API with the BullMQ driver:
+To use Redis-backed BullMQ dispatch with a separate worker process, start Redis
+and run both the API and worker with the BullMQ driver:
 
 ```bash
 brew services start redis
 
+STORE_DRIVER=postgres \
+DATABASE_URL=postgres://user:password@127.0.0.1:5432/cloud_agent_platform \
 QUEUE_DRIVER=bullmq \
 REDIS_URL=redis://127.0.0.1:6379 \
 JOB_CONCURRENCY=2 \
 JOB_MAX_ATTEMPTS=3 \
-npm run dev
+npm run dev:api
+```
+
+In a second terminal, start the worker:
+
+```bash
+STORE_DRIVER=postgres \
+DATABASE_URL=postgres://user:password@127.0.0.1:5432/cloud_agent_platform \
+QUEUE_DRIVER=bullmq \
+REDIS_URL=redis://127.0.0.1:6379 \
+JOB_CONCURRENCY=2 \
+JOB_MAX_ATTEMPTS=3 \
+npm run dev:worker
 ```
 
 BullMQ mode persists queued job dispatch in Redis and applies exponential
-backoff for processor errors. Job state is still stored by the configured
-`JobStore`; the current demo store is in-memory. That means current BullMQ mode
-is for single-process local experiments only: do not run multiple API or worker
-instances, and do not treat Redis queue persistence as job recovery after an API
-process restart. A separate worker process should be added together with a
-durable store such as Postgres.
+backoff for processor errors. In BullMQ mode, the API creates jobs and enqueues
+job IDs, while `apps/worker/src/worker.ts` consumes the queue and runs the agent
+orchestrator. The worker requires `STORE_DRIVER=postgres` and
+`QUEUE_DRIVER=bullmq` so job state and events survive process restarts.
+
+The API and worker must also use the same shared sandbox workspace. In local
+development this usually means running both processes on the same host with the
+same absolute `SANDBOX_ROOT`. In containerized deployments, mount the same
+volume at the same path in both containers. The worker validates the stored
+workspace path before running the agent so a misconfigured worker fails the job
+instead of silently processing an empty workspace.
 
 For local development it is useful to keep completed and failed BullMQ job
 records in Redis for debugging. In long-running production environments, Redis
@@ -137,6 +156,11 @@ event stream used by the `/jobs/:jobId` and WebSocket endpoints. The in-memory
 store remains the default so the project can still run without external
 services.
 
+When running the separate worker, use the same `STORE_DRIVER=postgres` and
+`DATABASE_URL` values for both the API and worker. The API enqueues jobs, and
+the worker is responsible for moving jobs through `running`, `succeeded`, and
+`failed` states.
+
 ## Project Layout
 
 ```text
@@ -152,7 +176,7 @@ migrations            SQL schema migrations for production backends
 ## Production Upgrade Path
 
 - Replace `InMemoryJobStore` with Postgres.
-- Use `BullMqJobQueue` with Redis for durable dispatch, then split API and worker once the store is durable.
+- Use `BullMqJobQueue` with Redis for durable dispatch through the separate worker process.
 - Replace `LocalSandbox` with Docker, Kubernetes Jobs, or Firecracker.
 - Store workspace snapshots and artifacts in object storage.
 - Add auth, tenant quotas, audit logs, rate limits, and policy enforcement.

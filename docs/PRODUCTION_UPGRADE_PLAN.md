@@ -3,15 +3,29 @@
 This project started with small local adapters so the agent platform could run
 as a compact demo. Several production-oriented adapters now exist, but some
 operational pieces are still intentionally incomplete. The main remaining
-upgrade areas are worker separation, event streaming, observability,
-cancellation, artifact storage, and production controls.
+upgrade areas are event streaming, observability, cancellation, artifact
+storage, and production controls.
 
 ## Current State
 
 ```text
+Memory demo mode
+
 Fastify API
   -> InMemoryJobStore / PostgresJobStore
-  -> InMemoryJobQueue / BullMqJobQueue
+  -> InMemoryJobQueue
+  -> AgentOrchestrator
+  -> LocalSandbox / DockerSandbox
+  -> LLM Provider
+
+BullMQ/Postgres split mode
+
+Fastify API
+  -> PostgresJobStore
+  -> BullMqJobQueue enqueue
+
+Worker Process
+  -> BullMqJobQueue process
   -> AgentOrchestrator
   -> LocalSandbox / DockerSandbox
   -> LLM Provider
@@ -50,14 +64,21 @@ The BullMQ queue supports:
 - Redis-backed job dispatch.
 - Configurable concurrency.
 - Retry attempts with exponential backoff.
+- Configurable retention for completed and failed BullMQ job records.
 - Queue lifecycle events persisted through `JobStore`.
+- Failed enqueue attempts mark the already-created job as failed so durable
+  state does not leave orphan queued jobs.
 
 ### Limitations
 
-- The API process still registers the BullMQ processor directly.
-- There is no separate worker entrypoint yet.
-- BullMQ mode should not be run as a multi-process worker fleet until API and
-  worker startup are split.
+- BullMQ processing now runs from a separate worker entrypoint.
+- API and worker startup are split for BullMQ/Postgres mode.
+- API and worker must share the same sandbox workspace path; workers validate
+  the stored workspace path before running the agent.
+- Queue event persistence is best-effort after the durable queue operation.
+  Missing lifecycle events, such as `queue.active`, must be diagnosed from
+  worker logs or future metrics rather than treated as proof that the job did
+  not run.
 - No dead-letter queue.
 - No priority support.
 - No delayed jobs.
@@ -87,8 +108,8 @@ Worker Process
 ### Implementation Tasks
 
 1. ~~Add `BullMqJobQueue implements JobQueue`.~~ Done.
-2. Move worker startup into a separate worker entrypoint, for example
-   `apps/worker/src/worker.ts`.
+2. ~~Move worker startup into a separate worker entrypoint, for example
+   `apps/worker/src/worker.ts`.~~ Done.
 3. ~~Keep `InMemoryJobQueue` for local demos and tests.~~ Done.
 4. ~~Add queue configuration.~~ Done:
 
@@ -97,6 +118,10 @@ QUEUE_DRIVER=memory|bullmq
 REDIS_URL=redis://localhost:6379
 JOB_CONCURRENCY=2
 JOB_MAX_ATTEMPTS=3
+QUEUE_REMOVE_ON_COMPLETE_AGE=3600
+QUEUE_REMOVE_ON_COMPLETE_COUNT=1000
+QUEUE_REMOVE_ON_FAIL_AGE=86400
+QUEUE_REMOVE_ON_FAIL_COUNT=5000
 ```
 
 5. ~~Add retry/backoff policy.~~ Done for processor failures.
@@ -123,7 +148,7 @@ The store interface supports:
 ### Limitations
 
 - In memory mode, job history is still lost on process restart.
-- Postgres mode provides durable state, but the API and worker are not split yet.
+- Postgres mode provides durable state for the split API and worker processes.
 - No tenant isolation.
 - Postgres has basic query indexes and a durable event log.
 - No artifact metadata.
@@ -267,7 +292,7 @@ For stronger isolation later, consider:
 ```text
 SANDBOX_DRIVER=local|docker
 SANDBOX_IMAGE=cloud-agent-sandbox:latest
-SANDBOX_CPU=1
+SANDBOX_CPUS=1
 SANDBOX_MEMORY=512m
 SANDBOX_NETWORK=none
 SANDBOX_TIMEOUT_MS=120000
@@ -370,9 +395,10 @@ This phase targets the assignment requirement around sandbox and isolation.
 
 ### Phase 2: Separate API And Worker
 
-- Add a worker entrypoint.
+- ~~Add a worker entrypoint.~~ Done.
 - ~~Add `BullMqJobQueue`.~~ Done.
-- ~~Use Redis for durable job dispatch.~~ Done within the current API process.
+- ~~Use Redis for durable job dispatch.~~ Done with separate API and worker
+  processes.
 - ~~Keep `InMemoryJobStore` if needed, but prefer moving to Postgres soon
   after.~~ Done.
 
@@ -452,8 +478,7 @@ The original highest-value upgrades were:
 Those are now implemented at a first production-oriented level. The highest
 value next changes are:
 
-1. Split API and worker processes.
-2. Add LLM diagnostics and broader observability.
-3. Add durable cancellation.
-4. Add artifact metadata and object storage.
-5. Add tenant/auth/quota controls.
+1. Add LLM diagnostics and broader observability.
+2. Add durable cancellation.
+3. Add artifact metadata and object storage.
+4. Add tenant/auth/quota controls.

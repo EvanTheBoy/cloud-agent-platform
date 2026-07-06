@@ -25,17 +25,18 @@ export class AgentOrchestrator {
       throw new Error(`Job ${jobId} not found`);
     }
 
-    job = await this.options.store.update(job.id, { status: "running" });
-
-    const messages: AgentMessage[] = [
-      {
-        role: "system",
-        content: "You are an autonomous cloud coding agent. Use tools to inspect the sandbox, then finish with a concise report."
-      },
-      { role: "user", content: job.task }
-    ];
-
     try {
+      await this.options.sandbox.validateWorkspace(job.id, job.workspacePath);
+      job = await this.options.store.update(job.id, { status: "running" });
+
+      const messages: AgentMessage[] = [
+        {
+          role: "system",
+          content: "You are an autonomous cloud coding agent. Use tools to inspect the sandbox, then finish with a concise report."
+        },
+        { role: "user", content: job.task }
+      ];
+
       for (let index = 0; index < this.maxSteps; index += 1) {
         const response = await this.options.llm.complete(messages, [...this.toolsByName.values()]);
         messages.push({ role: "assistant", content: response.message });

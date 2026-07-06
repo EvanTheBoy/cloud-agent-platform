@@ -99,6 +99,7 @@ export interface SandboxResult {
 
 export interface Sandbox {
   prepare(jobId: string): Promise<string>;
+  validateWorkspace(jobId: string, expectedPath: string): Promise<void>;
   exec(jobId: string, command: SandboxCommand): Promise<SandboxResult>;
   writeFile(jobId: string, relativePath: string, content: string): Promise<void>;
   readFile(jobId: string, relativePath: string): Promise<string>;

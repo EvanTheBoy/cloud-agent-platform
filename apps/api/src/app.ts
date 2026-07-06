@@ -4,19 +4,8 @@ import Fastify from "fastify";
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import {
-  AgentOrchestrator,
-  BullMqJobQueue,
-  DemoLlmProvider,
-  InMemoryJobQueue,
-  InMemoryJobStore,
-  OpenAiCompatibleProvider,
-  PostgresJobStore,
-  defaultTools
-} from "../../../packages/agent-core/src/index.js";
-import type { JobQueue, JobStore, LlmProvider } from "../../../packages/agent-core/src/index.js";
-import type { Sandbox } from "../../../packages/agent-core/src/types.js";
-import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
+import { closeAgentRuntime, createApiRuntime, createWorkerRuntime } from "./runtime.js";
+import type { ApiRuntime, WorkerRuntime } from "./runtime.js";
 
 const createJobSchema = z.object({
   task: z.string().min(3),
@@ -39,49 +28,40 @@ export interface AppOptions {
   databaseUrl?: string;
   jobConcurrency?: number;
   jobMaxAttempts?: number;
+  queueRemoveOnCompleteAge?: number;
+  queueRemoveOnCompleteCount?: number;
+  queueRemoveOnFailAge?: number;
+  queueRemoveOnFailCount?: number;
   maxSteps: number;
   defaultSourcePath?: string;
   allowedSourceRoot?: string;
+  processJobsInApi?: boolean;
 }
 
 export async function buildApp(options: AppOptions) {
+  if (options.queueDriver === "bullmq" && options.processJobsInApi) {
+    throw new Error("BullMQ jobs must be processed by the separate worker process");
+  }
+
+  if (options.queueDriver === "bullmq" && !options.processJobsInApi && options.storeDriver !== "postgres") {
+    throw new Error("BullMQ API/worker mode requires STORE_DRIVER=postgres");
+  }
+
   const app = Fastify({ logger: true });
   await app.register(cors, { origin: true });
   await app.register(websocket);
 
-  const store = await createJobStore(options);
-  let queue: JobQueue | undefined;
-  let sandbox: Sandbox | undefined;
+  const runtime = options.processJobsInApi ? await createWorkerRuntime(options) : await createApiRuntime(options);
+  const { store, queue, sandbox } = runtime;
 
-  try {
-    queue = createJobQueue(options, store);
-    sandbox = createSandbox(options);
-    const llm = createLlmProvider();
-    const orchestrator = new AgentOrchestrator({
-      store,
-      sandbox,
-      llm,
-      tools: defaultTools,
-      maxSteps: options.maxSteps
-    });
-
+  if (isWorkerRuntime(runtime)) {
     queue.process(async (jobId) => {
-      return orchestrator.run(jobId);
+      return runtime.orchestrator.run(jobId);
     });
-  } catch (error) {
-    await queue?.close?.();
-    await store.close?.();
-    throw error;
-  }
-
-  if (!queue || !sandbox) {
-    await store.close?.();
-    throw new Error("Failed to initialize application resources");
   }
 
   app.addHook("onClose", async () => {
-    await queue.close?.();
-    await store.close?.();
+    await closeAgentRuntime(runtime);
   });
 
   app.get("/health", async () => ({ ok: true }));
@@ -100,7 +80,26 @@ export async function buildApp(options: AppOptions) {
     const workspacePath = await sandbox.prepare(jobId);
     await sandbox.importDirectory(jobId, sourcePath);
     const job = await store.create({ id: jobId, task: parsed.task, workspacePath });
-    await queue.enqueue(job.id);
+    try {
+      await queue.enqueue(job.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failedJob = await store.update(job.id, {
+        status: "failed",
+        error: `Failed to enqueue job: ${message}`
+      });
+      await store.appendEvent({
+        type: "job.finished",
+        jobId: job.id,
+        timestamp: new Date().toISOString(),
+        payload: {
+          status: failedJob.status,
+          error: failedJob.error,
+          failureKind: "enqueue"
+        }
+      });
+      return reply.code(503).send({ error: "Failed to enqueue job", job: failedJob });
+    }
     return reply.code(202).send({ job });
   });
 
@@ -139,73 +138,8 @@ export async function buildApp(options: AppOptions) {
   return app;
 }
 
-async function createJobStore(options: AppOptions): Promise<JobStore> {
-  if (options.storeDriver === "postgres") {
-    if (!options.databaseUrl) {
-      throw new Error("DATABASE_URL is required when STORE_DRIVER=postgres");
-    }
-    return PostgresJobStore.create({ connectionString: options.databaseUrl });
-  }
-
-  return new InMemoryJobStore();
-}
-
-function createJobQueue(options: AppOptions, store: JobStore): JobQueue {
-  const onEvent = async (event: {
-    type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.attempt_failed" | "queue.failed";
-    jobId: string;
-    payload?: Record<string, unknown>;
-  }) => {
-    await store.appendEvent({
-      type: event.type,
-      jobId: event.jobId,
-      timestamp: new Date().toISOString(),
-      payload: event.payload ?? {}
-    });
-  };
-
-  if (options.queueDriver === "bullmq") {
-    if (!options.redisUrl) {
-      throw new Error("REDIS_URL is required when QUEUE_DRIVER=bullmq");
-    }
-    return new BullMqJobQueue({
-      redisUrl: options.redisUrl,
-      concurrency: options.jobConcurrency,
-      maxAttempts: options.jobMaxAttempts,
-      onEvent
-    });
-  }
-
-  return new InMemoryJobQueue(options.jobConcurrency ?? 2, onEvent);
-}
-
-function createSandbox(options: AppOptions): Sandbox {
-  if (options.sandboxDriver === "docker") {
-    return new DockerSandbox({
-      rootDir: options.sandboxRoot,
-      image: options.sandboxImage ?? "cloud-agent-sandbox:latest",
-      cpus: options.sandboxCpus,
-      memory: options.sandboxMemory,
-      network: options.sandboxNetwork ?? "none",
-      user: options.sandboxUser,
-      pidsLimit: options.sandboxPidsLimit,
-      defaultTimeoutMs: options.sandboxTimeoutMs
-    });
-  }
-
-  return new LocalSandbox({ rootDir: options.sandboxRoot });
-}
-
-function createLlmProvider(): LlmProvider {
-  if (process.env.OPENAI_API_KEY) {
-    return new OpenAiCompatibleProvider({
-      apiKey: process.env.OPENAI_API_KEY,
-      baseUrl: process.env.OPENAI_BASE_URL,
-      model: process.env.OPENAI_MODEL
-    });
-  }
-
-  return new DemoLlmProvider();
+function isWorkerRuntime(runtime: ApiRuntime | WorkerRuntime): runtime is WorkerRuntime {
+  return "orchestrator" in runtime;
 }
 
 async function resolveAllowedSourcePath(sourcePath: string, allowedRoot: string): Promise<string> {
