@@ -48,10 +48,15 @@ The platform currently records:
   payloads store only redacted, bounded result previews.
 - Final job status and error message.
 - Durable event history in Postgres when `STORE_DRIVER=postgres`.
+- In-process Prometheus metrics at `/metrics` for API/worker-local runtime
+  behavior, including job outcomes, queue events, queue latency when observable
+  in the current process, agent steps, LLM requests, tools, sandbox commands,
+  and job store operations.
 
 This is enough to see that a job failed and to diagnose malformed
 OpenAI-compatible tool-call arguments, thrown tool errors, and sandbox command
-execution behavior. Metrics and tracing diagnostics are still incomplete.
+execution behavior. Distributed tracing across API, queue, worker, LLM, and
+sandbox boundaries is still incomplete.
 
 ## Observability Goals
 
@@ -289,15 +294,20 @@ commands made through `sandbox.exec`.
 
 ### Phase 3: Metrics And Tracing
 
-Add process-level metrics:
+Status: process-level metrics are implemented with a dependency-free in-memory
+recorder and Prometheus text rendering. Distributed tracing is still pending.
+
+Implemented process-level metrics:
 
 - Job counts by status.
-- Queue latency.
+- Queue lifecycle event counts.
+- Queue latency when enqueue and activation are observed in the same process.
 - Agent step duration.
 - LLM latency and failure count by provider/model.
+- LLM malformed tool-argument parse failure count by provider/model/tool/reason.
 - Tool latency and failure count by tool name.
-- Sandbox command duration and timeout count.
-- Postgres query latency and pool usage.
+- Sandbox command duration, failure count, and timeout count.
+- Job store operation latency and failure count by store driver/operation.
 
 OpenTelemetry would be a reasonable fit once the platform has separate API and
 worker processes.
@@ -317,8 +327,7 @@ No persisted event should expose API keys or authorization secrets.
 
 ## Current Follow-Up
 
-The immediate next observability task is Phase 3: process-level metrics for job
-status, LLM latency, tool latency, sandbox command duration/failures, queue
-latency, and Postgres pool/query health. Distributed tracing across API, queue,
-worker, LLM, and sandbox boundaries should follow once those metrics are in
-place.
+The immediate next observability task is distributed tracing across API, queue,
+worker, LLM, and sandbox boundaries. The current metrics are process-local, so
+BullMQ API/worker deployments need each process scraped separately until an
+OpenTelemetry exporter or central metrics backend is introduced.

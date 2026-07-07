@@ -5,6 +5,7 @@ import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { diagnosticTextFields } from "../../../packages/agent-core/src/index.js";
+import type { MetricsRecorder } from "../../../packages/agent-core/src/index.js";
 import { closeAgentRuntime, createApiRuntime, createWorkerRuntime } from "./runtime.js";
 import type { ApiRuntime, WorkerRuntime } from "./runtime.js";
 
@@ -37,6 +38,7 @@ export interface AppOptions {
   defaultSourcePath?: string;
   allowedSourceRoot?: string;
   processJobsInApi?: boolean;
+  metrics?: MetricsRecorder;
 }
 
 export async function buildApp(options: AppOptions) {
@@ -66,6 +68,10 @@ export async function buildApp(options: AppOptions) {
   });
 
   app.get("/health", async () => ({ ok: true }));
+
+  app.get("/metrics", async (_request, reply) => {
+    return reply.type("text/plain; version=0.0.4; charset=utf-8").send(runtime.metrics.renderPrometheus?.() ?? "");
+  });
 
   app.get("/jobs", async () => {
     return { jobs: await store.list() };

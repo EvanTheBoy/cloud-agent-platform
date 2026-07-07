@@ -1,6 +1,8 @@
 import { nanoid } from "nanoid";
 import type { AgentMessage, LlmDiagnostics, LlmProvider, LlmResponse, Tool } from "./types.js";
 import { previewDiagnosticText, redactSensitiveText } from "./diagnostics.js";
+import type { MetricsRecorder } from "./metrics.js";
+import { recordIncrement, recordObservation } from "./metrics.js";
 
 export class DemoLlmProvider implements LlmProvider {
   async complete(messages: AgentMessage[], _tools: Tool[]): Promise<LlmResponse> {
@@ -48,6 +50,7 @@ interface OpenAiProviderOptions {
   apiKey: string;
   baseUrl?: string;
   model?: string;
+  metrics?: MetricsRecorder;
 }
 
 interface OpenAiChatMessage {
@@ -120,11 +123,13 @@ export class OpenAiCompatibleProvider implements LlmProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly model: string;
+  private readonly metrics?: MetricsRecorder;
 
   constructor(options: OpenAiProviderOptions) {
     this.apiKey = options.apiKey;
     this.baseUrl = options.baseUrl ?? "https://api.openai.com/v1";
     this.model = options.model ?? "gpt-4.1-mini";
+    this.metrics = options.metrics;
   }
 
   async complete(messages: AgentMessage[], tools: Tool[], diagnostics?: LlmDiagnostics): Promise<LlmResponse> {
@@ -175,6 +180,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       payload = (await response.json().catch(() => ({}))) as OpenAiChatResponse;
     } catch (error) {
       const errorMessage = redactSensitiveText(error instanceof Error ? error.message : String(error));
+      this.recordRequestMetrics(Date.now() - startedAt, "failure");
       await diagnostics?.({
         type: "llm.request.failed",
         payload: {
@@ -190,6 +196,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
 
     if (!response.ok) {
       const errorMessage = redactSensitiveText(payload.error?.message ?? response.statusText);
+      this.recordRequestMetrics(Date.now() - startedAt, "failure", response.status);
       await diagnostics?.({
         type: "llm.request.failed",
         payload: {
@@ -204,6 +211,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       throw new Error(`OpenAI-compatible API request failed: ${errorMessage}`);
     }
 
+    this.recordRequestMetrics(Date.now() - startedAt, "success", response.status);
     await diagnostics?.({
       type: "llm.response.received",
       payload: {
@@ -279,6 +287,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     try {
       parsed = JSON.parse(rawArguments) as unknown;
     } catch (error) {
+      this.recordParseFailure(toolName, "invalid_json");
       await this.emitToolArgumentsParseFailed(
         rawArguments,
         toolName,
@@ -289,6 +298,7 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     }
 
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      this.recordParseFailure(toolName, "not_object");
       await this.emitToolArgumentsParseFailed(rawArguments, toolName, "Tool arguments must be a JSON object.", diagnostics, "not_object");
       throw new Error("Tool arguments must be a JSON object.");
     }
@@ -324,5 +334,31 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     } catch {
       return "unknown";
     }
+  }
+
+  private recordRequestMetrics(durationMs: number, outcome: "success" | "failure", status?: number): void {
+    const labels = {
+      provider: "openai-compatible",
+      model: this.model,
+      outcome,
+      status: status === undefined ? undefined : String(status)
+    };
+    recordObservation(this.metrics, "agent_llm_request_duration_ms", durationMs, labels);
+    if (outcome === "failure") {
+      recordIncrement(this.metrics, "agent_llm_request_failures_total", {
+        provider: "openai-compatible",
+        model: this.model,
+        status: status === undefined ? undefined : String(status)
+      });
+    }
+  }
+
+  private recordParseFailure(toolName: string, reason: string): void {
+    recordIncrement(this.metrics, "agent_llm_tool_argument_parse_failures_total", {
+      provider: "openai-compatible",
+      model: this.model,
+      toolName,
+      reason
+    });
   }
 }

@@ -18,6 +18,8 @@ import {
   redactSensitiveText,
   sanitizeDiagnosticValue
 } from "./diagnostics.js";
+import type { MetricsRecorder } from "./metrics.js";
+import { recordIncrement, recordObservation } from "./metrics.js";
 
 const now = () => new Date().toISOString();
 const OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n";
@@ -28,6 +30,7 @@ export interface AgentOrchestratorOptions {
   llm: LlmProvider;
   tools: Tool[];
   maxSteps?: number;
+  metrics?: MetricsRecorder;
 }
 
 export class AgentOrchestrator {
@@ -40,6 +43,7 @@ export class AgentOrchestrator {
   }
 
   async run(jobId: string): Promise<AgentJob> {
+    const jobStartedAt = Date.now();
     let job = await this.options.store.get(jobId);
     if (!job) {
       throw new Error(`Job ${jobId} not found`);
@@ -48,6 +52,7 @@ export class AgentOrchestrator {
     try {
       await this.options.sandbox.validateWorkspace(job.id, job.workspacePath);
       job = await this.options.store.update(job.id, { status: "running" });
+      recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
 
       const messages: AgentMessage[] = [
         {
@@ -90,6 +95,7 @@ export class AgentOrchestrator {
         }
 
         const toolStartedAt = Date.now();
+        const stepStartedAt = toolStartedAt;
         await this.safeAppendDiagnosticEvent(job.id, "tool.started", {
           toolName: tool.name,
           inputPreview: previewToolInput(tool.name, toolCall.input)
@@ -99,22 +105,37 @@ export class AgentOrchestrator {
         try {
           result = await tool.execute(toolCall.input, {
             job,
-            sandbox: new DiagnosticSandbox(this.options.sandbox, async (type, payload) => {
-              await this.safeAppendDiagnosticEvent(currentJobId, type, payload);
-            })
+            sandbox: new DiagnosticSandbox(
+              this.options.sandbox,
+              async (type, payload) => {
+                await this.safeAppendDiagnosticEvent(currentJobId, type, payload);
+              },
+              this.options.metrics
+            )
           });
         } catch (error) {
+          const durationMs = Date.now() - toolStartedAt;
+          recordObservation(this.options.metrics, "agent_tool_duration_ms", durationMs, {
+            toolName: tool.name,
+            outcome: "failure"
+          });
+          recordIncrement(this.options.metrics, "agent_tool_failures_total", { toolName: tool.name });
           await this.safeAppendDiagnosticEvent(job.id, "tool.failed", {
             toolName: tool.name,
-            durationMs: Date.now() - toolStartedAt,
+            durationMs,
             error: redactSensitiveText(error instanceof Error ? error.message : String(error))
           });
           throw error;
         }
 
+        const toolDurationMs = Date.now() - toolStartedAt;
+        recordObservation(this.options.metrics, "agent_tool_duration_ms", toolDurationMs, {
+          toolName: tool.name,
+          outcome: "success"
+        });
         await this.safeAppendDiagnosticEvent(job.id, "tool.finished", {
           toolName: tool.name,
-          durationMs: Date.now() - toolStartedAt,
+          durationMs: toolDurationMs,
           observationBytes: Buffer.byteLength(result.observation, "utf8"),
           final: Boolean(result.final)
         });
@@ -138,12 +159,18 @@ export class AgentOrchestrator {
           timestamp: finishedStep.finishedAt ?? now(),
           payload: { step: persistedStep }
         });
+        recordObservation(this.options.metrics, "agent_step_duration_ms", Date.now() - stepStartedAt, {
+          toolName: tool.name,
+          final: Boolean(result.final)
+        });
 
         if (result.final) {
           job = await this.options.store.update(job.id, {
             status: "succeeded",
             result: result.final
           });
+          recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
+          recordObservation(this.options.metrics, "agent_job_duration_ms", Date.now() - jobStartedAt, { status: job.status });
           await this.options.store.appendEvent({
             type: "job.finished",
             jobId: job.id,
@@ -164,6 +191,8 @@ export class AgentOrchestrator {
         status: "failed",
         error: message
       });
+      recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
+      recordObservation(this.options.metrics, "agent_job_duration_ms", Date.now() - jobStartedAt, { status: job.status });
       await this.options.store.appendEvent({
         type: "job.finished",
         jobId: job.id,
@@ -200,7 +229,8 @@ type AppendDiagnosticEvent = (type: JobEventType, payload: Record<string, unknow
 class DiagnosticSandbox implements Sandbox {
   constructor(
     private readonly inner: Sandbox,
-    private readonly appendDiagnosticEvent: AppendDiagnosticEvent
+    private readonly appendDiagnosticEvent: AppendDiagnosticEvent,
+    private readonly metrics?: MetricsRecorder
   ) {}
 
   async prepare(jobId: string): Promise<string> {
@@ -224,16 +254,28 @@ class DiagnosticSandbox implements Sandbox {
     try {
       result = await this.inner.exec(jobId, command);
     } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      recordObservation(this.metrics, "agent_sandbox_command_duration_ms", durationMs, { outcome: "failure" });
+      recordIncrement(this.metrics, "agent_sandbox_command_failures_total");
       await this.appendDiagnosticEvent("sandbox.command.failed", {
         command: command.command,
         argsCount: command.args?.length ?? 0,
         requestedTimeoutMs,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         error: redactSensitiveText(error instanceof Error ? error.message : String(error))
       });
       throw error;
     }
 
+    const timedOut = result.stderr.includes("Command timed out");
+    const outcome = result.exitCode === 0 ? "success" : "failure";
+    recordObservation(this.metrics, "agent_sandbox_command_duration_ms", result.durationMs, { outcome });
+    if (outcome === "failure") {
+      recordIncrement(this.metrics, "agent_sandbox_command_failures_total");
+    }
+    if (timedOut) {
+      recordIncrement(this.metrics, "agent_sandbox_command_timeouts_total");
+    }
     await this.appendDiagnosticEvent("sandbox.command.finished", {
       command: command.command,
       argsCount: command.args?.length ?? 0,

@@ -4,12 +4,16 @@ import {
   DemoLlmProvider,
   InMemoryJobQueue,
   InMemoryJobStore,
+  InMemoryMetricsRecorder,
+  InstrumentedJobStore,
   OpenAiCompatibleProvider,
   PostgresJobStore,
+  recordIncrement,
+  recordObservation,
   sanitizeDiagnosticValue,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
-import type { JobQueue, JobStore, LlmProvider } from "../../../packages/agent-core/src/index.js";
+import type { JobQueue, JobStore, LlmProvider, MetricsRecorder } from "../../../packages/agent-core/src/index.js";
 import type { Sandbox } from "../../../packages/agent-core/src/types.js";
 import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
 import type { AppOptions } from "./app.js";
@@ -18,6 +22,7 @@ export interface ApiRuntime {
   store: JobStore;
   queue: JobQueue;
   sandbox: Sandbox;
+  metrics: MetricsRecorder;
 }
 
 export interface WorkerRuntime extends ApiRuntime {
@@ -25,16 +30,18 @@ export interface WorkerRuntime extends ApiRuntime {
 }
 
 export async function createApiRuntime(options: AppOptions): Promise<ApiRuntime> {
-  const store = await createJobStore(options);
+  const metrics = options.metrics ?? new InMemoryMetricsRecorder();
+  const { store, driver: storeDriver } = await createJobStore(options);
+  const instrumentedStore = new InstrumentedJobStore(store, metrics, storeDriver);
   let queue: JobQueue | undefined;
 
   try {
-    queue = createJobQueue(options, store);
+    queue = createJobQueue(options, instrumentedStore, metrics);
     const sandbox = createSandbox(options);
-    return { store, queue, sandbox };
+    return { store: instrumentedStore, queue, sandbox, metrics };
   } catch (error) {
     await queue?.close?.();
-    await store.close?.();
+    await instrumentedStore.close?.();
     throw error;
   }
 }
@@ -43,13 +50,14 @@ export async function createWorkerRuntime(options: AppOptions): Promise<WorkerRu
   const runtime = await createApiRuntime(options);
 
   try {
-    const llm = createLlmProvider();
+    const llm = createLlmProvider(runtime.metrics);
     const orchestrator = new AgentOrchestrator({
       store: runtime.store,
       sandbox: runtime.sandbox,
       llm,
       tools: defaultTools,
-      maxSteps: options.maxSteps
+      maxSteps: options.maxSteps,
+      metrics: runtime.metrics
     });
 
     return { ...runtime, orchestrator };
@@ -64,23 +72,26 @@ export async function closeAgentRuntime(runtime: Pick<ApiRuntime, "queue" | "sto
   await runtime.store.close?.();
 }
 
-function createJobStore(options: AppOptions): Promise<JobStore> | JobStore {
+async function createJobStore(options: AppOptions): Promise<{ store: JobStore; driver: string }> {
   if (options.storeDriver === "postgres") {
     if (!options.databaseUrl) {
       throw new Error("DATABASE_URL is required when STORE_DRIVER=postgres");
     }
-    return PostgresJobStore.create({ connectionString: options.databaseUrl });
+    return { store: await PostgresJobStore.create({ connectionString: options.databaseUrl }), driver: "postgres" };
   }
 
-  return new InMemoryJobStore();
+  return { store: new InMemoryJobStore(), driver: "memory" };
 }
 
-function createJobQueue(options: AppOptions, store: JobStore): JobQueue {
+function createJobQueue(options: AppOptions, store: JobStore, metrics: MetricsRecorder): JobQueue {
+  const queueDriver = options.queueDriver === "bullmq" ? "bullmq" : "memory";
+  const enqueuedAtByJobId = new Map<string, number>();
   const onEvent = async (event: {
     type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.attempt_failed" | "queue.failed";
     jobId: string;
     payload?: Record<string, unknown>;
   }) => {
+    recordQueueMetrics(metrics, queueDriver, enqueuedAtByJobId, event);
     await store.appendEvent({
       type: event.type,
       jobId: event.jobId,
@@ -123,12 +134,13 @@ function createSandbox(options: AppOptions): Sandbox {
   return new LocalSandbox({ rootDir: options.sandboxRoot });
 }
 
-function createLlmProvider(): LlmProvider {
+function createLlmProvider(metrics: MetricsRecorder): LlmProvider {
   if (process.env.OPENAI_API_KEY) {
     return new OpenAiCompatibleProvider({
       apiKey: process.env.OPENAI_API_KEY,
       baseUrl: process.env.OPENAI_BASE_URL,
-      model: process.env.OPENAI_MODEL
+      model: process.env.OPENAI_MODEL,
+      metrics
     });
   }
 
@@ -143,4 +155,39 @@ function buildBullMqRetention(age?: number, count?: number) {
     return { count };
   }
   return false;
+}
+
+function recordQueueMetrics(
+  metrics: MetricsRecorder,
+  queueDriver: string,
+  enqueuedAtByJobId: Map<string, number>,
+  event: {
+    type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.attempt_failed" | "queue.failed";
+    jobId: string;
+    payload?: Record<string, unknown>;
+  }
+): void {
+  const queueEvent = event.type.replace(/^queue\./, "");
+  recordIncrement(metrics, "agent_queue_events_total", {
+    driver: queueDriver,
+    event: queueEvent,
+    status: typeof event.payload?.status === "string" ? event.payload.status : undefined,
+    failureKind: typeof event.payload?.failureKind === "string" ? event.payload.failureKind : undefined
+  });
+
+  if (event.type === "queue.enqueued") {
+    enqueuedAtByJobId.set(event.jobId, Date.now());
+    return;
+  }
+
+  if (event.type === "queue.active") {
+    const enqueuedAt = enqueuedAtByJobId.get(event.jobId);
+    if (enqueuedAt !== undefined) {
+      recordObservation(metrics, "agent_queue_latency_ms", Date.now() - enqueuedAt, { driver: queueDriver });
+    }
+  }
+
+  if (event.type === "queue.completed" || event.type === "queue.failed") {
+    enqueuedAtByJobId.delete(event.jobId);
+  }
 }

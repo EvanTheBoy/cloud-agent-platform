@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { AgentOrchestrator, InMemoryJobStore, OpenAiCompatibleProvider, shellExecTool } from "../../packages/agent-core/src/index.js";
+import { AgentOrchestrator, InMemoryJobStore, InMemoryMetricsRecorder, OpenAiCompatibleProvider, shellExecTool } from "../../packages/agent-core/src/index.js";
 import type { JobEvent, JobEventType, LlmProvider, LlmResponse, Sandbox, SandboxCommand, SandboxResult, Tool } from "../../packages/agent-core/src/types.js";
 
 describe("AgentOrchestrator", () => {
@@ -104,6 +104,7 @@ describe("AgentOrchestrator", () => {
 
   it("persists tool and sandbox diagnostics around shell execution", async () => {
     const store = new InMemoryJobStore();
+    const metrics = new InMemoryMetricsRecorder();
     const job = await store.create({
       id: "job-tool-success",
       task: "inspect files",
@@ -127,7 +128,8 @@ describe("AgentOrchestrator", () => {
         ]
       }),
       tools: [shellExecTool],
-      maxSteps: 1
+      maxSteps: 1,
+      metrics
     });
 
     const result = await orchestrator.run(job.id);
@@ -156,6 +158,9 @@ describe("AgentOrchestrator", () => {
     assert.equal(sandboxFinished?.payload.stdoutBytes, 3);
     assert.equal(sandboxFinished?.payload.stderrBytes, 0);
     assert.equal(sandboxFinished?.payload.stdoutTruncated, false);
+    assert.match(metrics.renderPrometheus(), /agent_tool_duration_ms_count\{outcome="success",toolName="shell\.exec"\} 1/);
+    assert.match(metrics.renderPrometheus(), /agent_sandbox_command_duration_ms_count\{outcome="success"\} 1/);
+    assert.match(metrics.renderPrometheus(), /agent_jobs_total\{status="failed"\} 1/);
   });
 
   it("persists tool failure diagnostics when a tool throws", async () => {
