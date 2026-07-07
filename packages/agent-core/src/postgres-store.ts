@@ -1,7 +1,8 @@
 import { nanoid } from "nanoid";
 import pg from "pg";
-import type { AgentJob, AgentStep, CreateJobInput, JobEvent, JobEventType, JobStatus, JobStore } from "./types.js";
+import type { AgentJob, AgentStep, CreateJobInput, JobEvent, JobEventType, JobStatus, JobStore, TraceContext } from "./types.js";
 import { jobEventPayload } from "./diagnostics.js";
+import { tracePayloadFields } from "./trace.js";
 
 const { Pool } = pg;
 
@@ -99,7 +100,7 @@ export class PostgresJobStore implements JobStore {
         type: "job.created",
         jobId: job.id,
         timestamp,
-        payload: { job: jobEventPayload(job) }
+        payload: { job: jobEventPayload(job), ...tracePayloadFields(input.traceContext) }
       });
       await client.query("COMMIT");
     } catch (error) {
@@ -118,7 +119,7 @@ export class PostgresJobStore implements JobStore {
     return row ? rowToJob(row) : undefined;
   }
 
-  async update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>): Promise<AgentJob> {
+  async update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>, traceContext?: TraceContext): Promise<AgentJob> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -163,7 +164,7 @@ export class PostgresJobStore implements JobStore {
         type: "job.updated",
         jobId: id,
         timestamp: updated.updatedAt,
-        payload: { job: jobEventPayload(updated) }
+        payload: { job: jobEventPayload(updated), ...tracePayloadFields(traceContext) }
       });
       await client.query("COMMIT");
       return updated;

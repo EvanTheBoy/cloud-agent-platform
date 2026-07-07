@@ -9,7 +9,8 @@ import type {
   SandboxCommand,
   SandboxResult,
   Tool,
-  ToolCall
+  ToolCall,
+  TraceContext
 } from "./types.js";
 import {
   DIAGNOSTIC_TEXT_PREVIEW_LIMIT,
@@ -18,6 +19,9 @@ import {
   redactSensitiveText,
   sanitizeDiagnosticValue
 } from "./diagnostics.js";
+import type { MetricsRecorder } from "./metrics.js";
+import { recordIncrement, recordObservation } from "./metrics.js";
+import { createChildTraceContext, createRootTraceContext, tracePayloadFields } from "./trace.js";
 
 const now = () => new Date().toISOString();
 const OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n";
@@ -28,6 +32,7 @@ export interface AgentOrchestratorOptions {
   llm: LlmProvider;
   tools: Tool[];
   maxSteps?: number;
+  metrics?: MetricsRecorder;
 }
 
 export class AgentOrchestrator {
@@ -39,7 +44,9 @@ export class AgentOrchestrator {
     this.toolsByName = new Map(options.tools.map((tool) => [tool.name, tool]));
   }
 
-  async run(jobId: string): Promise<AgentJob> {
+  async run(jobId: string, traceContext?: TraceContext): Promise<AgentJob> {
+    const runTraceContext = traceContext ?? createRootTraceContext();
+    const jobStartedAt = Date.now();
     let job = await this.options.store.get(jobId);
     if (!job) {
       throw new Error(`Job ${jobId} not found`);
@@ -47,7 +54,8 @@ export class AgentOrchestrator {
 
     try {
       await this.options.sandbox.validateWorkspace(job.id, job.workspacePath);
-      job = await this.options.store.update(job.id, { status: "running" });
+      job = await this.options.store.update(job.id, { status: "running" }, runTraceContext);
+      recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
 
       const messages: AgentMessage[] = [
         {
@@ -59,8 +67,9 @@ export class AgentOrchestrator {
 
       for (let index = 0; index < this.maxSteps; index += 1) {
         const currentJobId = job.id;
+        const llmTraceContext = createChildTraceContext(runTraceContext);
         const response = await this.options.llm.complete(messages, [...this.toolsByName.values()], async (event) => {
-          await this.safeAppendDiagnosticEvent(currentJobId, event.type, event.payload);
+          await this.safeAppendDiagnosticEvent(currentJobId, event.type, event.payload, llmTraceContext);
         });
         messages.push({ role: "assistant", content: response.message });
 
@@ -81,7 +90,7 @@ export class AgentOrchestrator {
           type: "step.started",
           jobId: job.id,
           timestamp: startedAt,
-          payload: { step: sanitizeStepForPersistence(step) }
+          payload: { step: sanitizeStepForPersistence(step), ...tracePayloadFields(runTraceContext) }
         });
 
         const tool = this.toolsByName.get(toolCall.name);
@@ -90,34 +99,52 @@ export class AgentOrchestrator {
         }
 
         const toolStartedAt = Date.now();
+        const stepStartedAt = toolStartedAt;
+        const toolTraceContext = createChildTraceContext(runTraceContext);
         await this.safeAppendDiagnosticEvent(job.id, "tool.started", {
           toolName: tool.name,
           inputPreview: previewToolInput(tool.name, toolCall.input)
-        });
+        }, toolTraceContext);
 
         let result;
         try {
           result = await tool.execute(toolCall.input, {
             job,
-            sandbox: new DiagnosticSandbox(this.options.sandbox, async (type, payload) => {
-              await this.safeAppendDiagnosticEvent(currentJobId, type, payload);
-            })
+            sandbox: new DiagnosticSandbox(
+              this.options.sandbox,
+              async (type, payload, eventTraceContext) => {
+                await this.safeAppendDiagnosticEvent(currentJobId, type, payload, eventTraceContext);
+              },
+              toolTraceContext,
+              this.options.metrics
+            )
           });
         } catch (error) {
+          const durationMs = Date.now() - toolStartedAt;
+          recordObservation(this.options.metrics, "agent_tool_duration_ms", durationMs, {
+            toolName: tool.name,
+            outcome: "failure"
+          });
+          recordIncrement(this.options.metrics, "agent_tool_failures_total", { toolName: tool.name });
           await this.safeAppendDiagnosticEvent(job.id, "tool.failed", {
             toolName: tool.name,
-            durationMs: Date.now() - toolStartedAt,
+            durationMs,
             error: redactSensitiveText(error instanceof Error ? error.message : String(error))
-          });
+          }, toolTraceContext);
           throw error;
         }
 
+        const toolDurationMs = Date.now() - toolStartedAt;
+        recordObservation(this.options.metrics, "agent_tool_duration_ms", toolDurationMs, {
+          toolName: tool.name,
+          outcome: "success"
+        });
         await this.safeAppendDiagnosticEvent(job.id, "tool.finished", {
           toolName: tool.name,
-          durationMs: Date.now() - toolStartedAt,
+          durationMs: toolDurationMs,
           observationBytes: Buffer.byteLength(result.observation, "utf8"),
           final: Boolean(result.final)
-        });
+        }, toolTraceContext);
 
         const finishedStep: AgentStep = {
           ...step,
@@ -130,26 +157,33 @@ export class AgentOrchestrator {
         job = await this.options.store.update(job.id, {
           steps: [...job.steps, persistedStep],
           result: result.final ?? job.result
-        });
+        }, runTraceContext);
 
         await this.options.store.appendEvent({
           type: "step.finished",
           jobId: job.id,
           timestamp: finishedStep.finishedAt ?? now(),
-          payload: { step: persistedStep }
+          payload: { step: persistedStep, ...tracePayloadFields(runTraceContext) }
+        });
+        recordObservation(this.options.metrics, "agent_step_duration_ms", Date.now() - stepStartedAt, {
+          toolName: tool.name,
+          final: Boolean(result.final)
         });
 
         if (result.final) {
           job = await this.options.store.update(job.id, {
             status: "succeeded",
             result: result.final
-          });
+          }, runTraceContext);
+          recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
+          recordObservation(this.options.metrics, "agent_job_duration_ms", Date.now() - jobStartedAt, { status: job.status });
           await this.options.store.appendEvent({
             type: "job.finished",
             jobId: job.id,
             timestamp: now(),
             payload: {
               status: job.status,
+              ...tracePayloadFields(runTraceContext),
               ...diagnosticTextFields("result", result.final)
             }
           });
@@ -163,13 +197,16 @@ export class AgentOrchestrator {
       job = await this.options.store.update(job.id, {
         status: "failed",
         error: message
-      });
+      }, runTraceContext);
+      recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
+      recordObservation(this.options.metrics, "agent_job_duration_ms", Date.now() - jobStartedAt, { status: job.status });
       await this.options.store.appendEvent({
         type: "job.finished",
         jobId: job.id,
         timestamp: now(),
         payload: {
           status: job.status,
+          ...tracePayloadFields(runTraceContext),
           ...diagnosticTextFields("error", message)
         }
       });
@@ -177,13 +214,18 @@ export class AgentOrchestrator {
     }
   }
 
-  private async safeAppendDiagnosticEvent(jobId: string, type: JobEventType, payload: Record<string, unknown>): Promise<void> {
+  private async safeAppendDiagnosticEvent(
+    jobId: string,
+    type: JobEventType,
+    payload: Record<string, unknown>,
+    traceContext?: TraceContext
+  ): Promise<void> {
     try {
       await this.options.store.appendEvent({
         type,
         jobId,
         timestamp: now(),
-        payload
+        payload: { ...payload, ...tracePayloadFields(traceContext) }
       });
     } catch (error) {
       console.warn("Failed to append diagnostic event", {
@@ -195,12 +237,18 @@ export class AgentOrchestrator {
   }
 }
 
-type AppendDiagnosticEvent = (type: JobEventType, payload: Record<string, unknown>) => Promise<void>;
+type AppendDiagnosticEvent = (
+  type: JobEventType,
+  payload: Record<string, unknown>,
+  traceContext?: TraceContext
+) => Promise<void>;
 
 class DiagnosticSandbox implements Sandbox {
   constructor(
     private readonly inner: Sandbox,
-    private readonly appendDiagnosticEvent: AppendDiagnosticEvent
+    private readonly appendDiagnosticEvent: AppendDiagnosticEvent,
+    private readonly parentTraceContext: TraceContext,
+    private readonly metrics?: MetricsRecorder
   ) {}
 
   async prepare(jobId: string): Promise<string> {
@@ -214,26 +262,39 @@ class DiagnosticSandbox implements Sandbox {
   async exec(jobId: string, command: SandboxCommand): Promise<SandboxResult> {
     const startedAt = Date.now();
     const requestedTimeoutMs = command.timeoutMs;
+    const sandboxTraceContext = createChildTraceContext(this.parentTraceContext);
     await this.appendDiagnosticEvent("sandbox.command.started", {
       command: command.command,
       argsCount: command.args?.length ?? 0,
       requestedTimeoutMs
-    });
+    }, sandboxTraceContext);
 
     let result: SandboxResult;
     try {
       result = await this.inner.exec(jobId, command);
     } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      recordObservation(this.metrics, "agent_sandbox_command_duration_ms", durationMs, { outcome: "failure" });
+      recordIncrement(this.metrics, "agent_sandbox_command_failures_total");
       await this.appendDiagnosticEvent("sandbox.command.failed", {
         command: command.command,
         argsCount: command.args?.length ?? 0,
         requestedTimeoutMs,
-        durationMs: Date.now() - startedAt,
+        durationMs,
         error: redactSensitiveText(error instanceof Error ? error.message : String(error))
-      });
+      }, sandboxTraceContext);
       throw error;
     }
 
+    const timedOut = result.stderr.includes("Command timed out");
+    const outcome = result.exitCode === 0 ? "success" : "failure";
+    recordObservation(this.metrics, "agent_sandbox_command_duration_ms", result.durationMs, { outcome });
+    if (outcome === "failure") {
+      recordIncrement(this.metrics, "agent_sandbox_command_failures_total");
+    }
+    if (timedOut) {
+      recordIncrement(this.metrics, "agent_sandbox_command_timeouts_total");
+    }
     await this.appendDiagnosticEvent("sandbox.command.finished", {
       command: command.command,
       argsCount: command.args?.length ?? 0,
@@ -244,7 +305,7 @@ class DiagnosticSandbox implements Sandbox {
       stderrBytes: Buffer.byteLength(result.stderr, "utf8"),
       stdoutTruncated: result.stdout.includes(OUTPUT_TRUNCATED_MARKER),
       stderrTruncated: result.stderr.includes(OUTPUT_TRUNCATED_MARKER)
-    });
+    }, sandboxTraceContext);
     return result;
   }
 

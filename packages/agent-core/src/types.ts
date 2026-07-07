@@ -69,15 +69,22 @@ export interface JobEvent {
   payload: Record<string, unknown>;
 }
 
+export interface TraceContext {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+}
+
 export interface CreateJobInput {
   id?: string;
   task: string;
+  traceContext?: TraceContext;
 }
 
 export interface JobStore {
   create(input: CreateJobInput & { workspacePath: string }): Promise<AgentJob>;
   get(id: string): Promise<AgentJob | undefined>;
-  update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>): Promise<AgentJob>;
+  update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>, traceContext?: TraceContext): Promise<AgentJob>;
   list(): Promise<AgentJob[]>;
   appendEvent(event: JobEvent): Promise<void>;
   getEvents(jobId: string): Promise<JobEvent[]>;
@@ -85,14 +92,14 @@ export interface JobStore {
 }
 
 export interface JobQueue {
-  enqueue(jobId: string): Promise<void>;
+  enqueue(jobId: string, traceContext?: TraceContext): Promise<void>;
   process(handler: JobHandler): void;
   close?(): Promise<void>;
 }
 
 export type JobHandlerResult = { status?: JobStatus; error?: string } | void;
 
-export type JobHandler = (jobId: string) => Promise<JobHandlerResult>;
+export type JobHandler = (jobId: string, traceContext?: TraceContext) => Promise<JobHandlerResult>;
 
 export interface SandboxCommand {
   command: string;

@@ -48,10 +48,22 @@ The platform currently records:
   payloads store only redacted, bounded result previews.
 - Final job status and error message.
 - Durable event history in Postgres when `STORE_DRIVER=postgres`.
+- In-process Prometheus metrics at `/metrics` for API and worker-local runtime
+  behavior, including job outcomes, queue events, queue latency when observable
+  in the current process, agent steps, LLM requests, tools, sandbox commands,
+  and job store operations. In BullMQ mode, scrape both the API process and the
+  standalone worker process because worker-owned LLM/tool/sandbox/orchestrator
+  metrics are not present in the API process.
+- Trace/span context is propagated through API job creation, queue enqueue,
+  worker execution, LLM calls, tool execution, and sandbox commands. Job events
+  include `traceId`, `spanId`, and `parentSpanId` in their payloads when a trace
+  context is available. BullMQ job data carries the queue span across the
+  API/worker process boundary.
 
 This is enough to see that a job failed and to diagnose malformed
 OpenAI-compatible tool-call arguments, thrown tool errors, and sandbox command
-execution behavior. Metrics and tracing diagnostics are still incomplete.
+execution behavior, while reconstructing the in-platform trace tree from
+persisted job events.
 
 ## Observability Goals
 
@@ -289,18 +301,48 @@ commands made through `sandbox.exec`.
 
 ### Phase 3: Metrics And Tracing
 
-Add process-level metrics:
+Status: process-level metrics are implemented with a dependency-free in-memory
+recorder and Prometheus text rendering. Distributed tracing is still pending.
+
+The in-memory recorder is intentional for the current phase: it keeps metrics
+dependency-free, matches Prometheus' scrape-current-process model, and makes
+tests deterministic without Redis, Postgres, or an external collector. It is not
+a full production aggregation layer. Metrics reset on process restart and are
+not shared across API and worker processes; production Prometheus deployments
+should scrape each long-running process separately.
+
+Implemented process-level metrics:
 
 - Job counts by status.
-- Queue latency.
+- Queue lifecycle event counts.
+- Queue latency when enqueue and activation are observed in the same process.
 - Agent step duration.
 - LLM latency and failure count by provider/model.
+- LLM malformed tool-argument parse failure count by provider/model/tool/reason.
 - Tool latency and failure count by tool name.
-- Sandbox command duration and timeout count.
-- Postgres query latency and pool usage.
+- Sandbox command duration, failure count, and timeout count.
+- Job store operation latency and failure count by store driver/operation.
 
-OpenTelemetry would be a reasonable fit once the platform has separate API and
-worker processes.
+Future metrics upgrade path:
+
+1. Keep `MetricsRecorder` as the instrumentation boundary so agent, queue, LLM,
+   tool, sandbox, and store code do not depend directly on a specific metrics
+   backend.
+2. For a Prometheus-only production deployment, scrape `/metrics` from every
+   long-running process that records metrics, including API and standalone
+   workers. Prometheus should aggregate by labels such as service, instance,
+   driver, model, status, and tool name.
+3. For a centralized metrics backend, add a production `MetricsRecorder`
+   implementation backed by OpenTelemetry Metrics or a Prometheus client
+   registry. The existing in-memory recorder should remain useful for local
+   development and tests, while production wiring injects the exporter-backed
+   recorder through `AppOptions.metrics`.
+4. When OpenTelemetry is introduced, add trace context propagation across API,
+   queue, worker, LLM, tool, and sandbox boundaries so metrics can be correlated
+   with distributed traces and persisted job events.
+5. Keep metric names and label sets stable during the migration. New backends
+   should preserve the current semantic names unless a deliberate versioned
+   rename is documented.
 
 ## Acceptance Criteria
 
@@ -317,8 +359,7 @@ No persisted event should expose API keys or authorization secrets.
 
 ## Current Follow-Up
 
-The immediate next observability task is Phase 3: process-level metrics for job
-status, LLM latency, tool latency, sandbox command duration/failures, queue
-latency, and Postgres pool/query health. Distributed tracing across API, queue,
-worker, LLM, and sandbox boundaries should follow once those metrics are in
-place.
+The immediate next observability task is distributed tracing across API, queue,
+worker, LLM, and sandbox boundaries. The current metrics are process-local, so
+BullMQ API/worker deployments need each process scraped separately until an
+OpenTelemetry exporter or central metrics backend is introduced.

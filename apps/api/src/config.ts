@@ -5,11 +5,24 @@ export interface ServerConfig extends AppOptions {
   port: number;
 }
 
+export interface WorkerConfig extends AppOptions {
+  metricsHost: string;
+  metricsPort: number;
+}
+
 export function loadServerConfig(): ServerConfig {
   const defaultSourcePath = resolve(process.env.DEFAULT_SOURCE_PATH ?? process.cwd());
   return {
     port: parsePositiveIntegerEnv("PORT", 8080),
     ...loadRuntimeConfig(defaultSourcePath)
+  };
+}
+
+export function loadWorkerConfig(): WorkerConfig {
+  return {
+    ...loadRuntimeConfig(),
+    metricsHost: process.env.WORKER_METRICS_HOST ?? "127.0.0.1",
+    metricsPort: parsePositiveIntegerEnv("WORKER_METRICS_PORT", 9091)
   };
 }
 

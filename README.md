@@ -171,6 +171,8 @@ REDIS_URL=redis://127.0.0.1:6379 \
 SANDBOX_ROOT="$(pwd)/workspace-runs" \
 JOB_CONCURRENCY=2 \
 JOB_MAX_ATTEMPTS=3 \
+WORKER_METRICS_HOST=127.0.0.1 \
+WORKER_METRICS_PORT=9091 \
 npm run dev:worker
 ```
 
@@ -197,6 +199,14 @@ The successful BullMQ path is confirmed when the queried job has
 test, causing the worker to use the built-in demo LLM provider. To test a real
 OpenAI-compatible endpoint instead, remove that override and configure
 `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
+
+The API exposes API-process metrics at `http://127.0.0.1:8080/metrics`. The
+standalone worker exposes worker-process metrics at
+`http://127.0.0.1:9091/metrics` by default. Set `WORKER_METRICS_HOST=0.0.0.0`
+when the worker runs in a container and Prometheus needs to scrape it over the
+container network. Prometheus should scrape both API and worker targets in
+BullMQ mode because LLM, tool, sandbox, and orchestrator metrics are recorded in
+the worker process.
 
 BullMQ mode persists queued job dispatch in Redis and applies exponential
 backoff for processor errors. In BullMQ mode, the API creates jobs and enqueues

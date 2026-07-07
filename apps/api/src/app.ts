@@ -4,7 +4,8 @@ import Fastify from "fastify";
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { diagnosticTextFields } from "../../../packages/agent-core/src/index.js";
+import { createRootTraceContext, diagnosticTextFields, tracePayloadFields } from "../../../packages/agent-core/src/index.js";
+import type { MetricsRecorder } from "../../../packages/agent-core/src/index.js";
 import { closeAgentRuntime, createApiRuntime, createWorkerRuntime } from "./runtime.js";
 import type { ApiRuntime, WorkerRuntime } from "./runtime.js";
 
@@ -37,6 +38,7 @@ export interface AppOptions {
   defaultSourcePath?: string;
   allowedSourceRoot?: string;
   processJobsInApi?: boolean;
+  metrics?: MetricsRecorder;
 }
 
 export async function buildApp(options: AppOptions) {
@@ -56,8 +58,8 @@ export async function buildApp(options: AppOptions) {
   const { store, queue, sandbox } = runtime;
 
   if (isWorkerRuntime(runtime)) {
-    queue.process(async (jobId) => {
-      return runtime.orchestrator.run(jobId);
+    queue.process(async (jobId, traceContext) => {
+      return runtime.orchestrator.run(jobId, traceContext);
     });
   }
 
@@ -66,6 +68,10 @@ export async function buildApp(options: AppOptions) {
   });
 
   app.get("/health", async () => ({ ok: true }));
+
+  app.get("/metrics", async (_request, reply) => {
+    return reply.type("text/plain; version=0.0.4; charset=utf-8").send(runtime.metrics.renderPrometheus?.() ?? "");
+  });
 
   app.get("/jobs", async () => {
     return { jobs: await store.list() };
@@ -78,23 +84,25 @@ export async function buildApp(options: AppOptions) {
       parsed.sourcePath ?? options.defaultSourcePath ?? process.cwd(),
       options.allowedSourceRoot ?? options.defaultSourcePath ?? process.cwd()
     );
+    const traceContext = createRootTraceContext();
     const workspacePath = await sandbox.prepare(jobId);
     await sandbox.importDirectory(jobId, sourcePath);
-    const job = await store.create({ id: jobId, task: parsed.task, workspacePath });
+    const job = await store.create({ id: jobId, task: parsed.task, workspacePath, traceContext });
     try {
-      await queue.enqueue(job.id);
+      await queue.enqueue(job.id, traceContext);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const failedJob = await store.update(job.id, {
         status: "failed",
         error: `Failed to enqueue job: ${message}`
-      });
+      }, traceContext);
       await store.appendEvent({
         type: "job.finished",
         jobId: job.id,
         timestamp: new Date().toISOString(),
         payload: {
           status: failedJob.status,
+          ...tracePayloadFields(traceContext),
           ...diagnosticTextFields("error", failedJob.error ?? ""),
           failureKind: "enqueue"
         }
