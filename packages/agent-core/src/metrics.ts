@@ -1,4 +1,4 @@
-import type { AgentJob, CreateJobInput, JobEvent, JobStore } from "./types.js";
+import type { AgentJob, CreateJobInput, JobEvent, JobStore, TraceContext } from "./types.js";
 
 export type MetricLabels = Record<string, string | number | boolean | undefined>;
 
@@ -146,8 +146,8 @@ export class InstrumentedJobStore implements JobStore {
     return await this.measure("list", () => this.inner.list());
   }
 
-  async update(id: string, patch: Partial<AgentJob>): Promise<AgentJob> {
-    return await this.measure("update", () => this.inner.update(id, patch));
+  async update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>, traceContext?: TraceContext): Promise<AgentJob> {
+    return await this.measure("update", () => this.inner.update(id, patch, traceContext));
   }
 
   async appendEvent(event: JobEvent): Promise<void> {

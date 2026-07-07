@@ -1,5 +1,5 @@
 import { nanoid } from "nanoid";
-import type { AgentJob, CreateJobInput, JobEvent, JobStore } from "./types.js";
+import type { AgentJob, CreateJobInput, JobEvent, JobStore, TraceContext } from "./types.js";
 import { jobEventPayload } from "./diagnostics.js";
 import { tracePayloadFields } from "./trace.js";
 
@@ -35,7 +35,7 @@ export class InMemoryJobStore implements JobStore {
     return this.jobs.get(id);
   }
 
-  async update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>): Promise<AgentJob> {
+  async update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>, traceContext?: TraceContext): Promise<AgentJob> {
     const existing = this.jobs.get(id);
     if (!existing) {
       throw new Error(`Job ${id} not found`);
@@ -51,7 +51,7 @@ export class InMemoryJobStore implements JobStore {
       type: "job.updated",
       jobId: id,
       timestamp: updated.updatedAt,
-      payload: { job: jobEventPayload(updated) }
+      payload: { job: jobEventPayload(updated), ...tracePayloadFields(traceContext) }
     });
     return updated;
   }

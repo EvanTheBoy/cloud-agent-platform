@@ -84,7 +84,7 @@ export interface CreateJobInput {
 export interface JobStore {
   create(input: CreateJobInput & { workspacePath: string }): Promise<AgentJob>;
   get(id: string): Promise<AgentJob | undefined>;
-  update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>): Promise<AgentJob>;
+  update(id: string, patch: Partial<Omit<AgentJob, "id" | "createdAt">>, traceContext?: TraceContext): Promise<AgentJob>;
   list(): Promise<AgentJob[]>;
   appendEvent(event: JobEvent): Promise<void>;
   getEvents(jobId: string): Promise<JobEvent[]>;

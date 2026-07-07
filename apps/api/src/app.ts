@@ -95,7 +95,7 @@ export async function buildApp(options: AppOptions) {
       const failedJob = await store.update(job.id, {
         status: "failed",
         error: `Failed to enqueue job: ${message}`
-      });
+      }, traceContext);
       await store.appendEvent({
         type: "job.finished",
         jobId: job.id,

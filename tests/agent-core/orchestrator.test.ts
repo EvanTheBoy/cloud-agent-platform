@@ -201,8 +201,18 @@ describe("AgentOrchestrator", () => {
     const sandboxStarted = events.find((event) => event.type === "sandbox.command.started");
     const sandboxFinished = events.find((event) => event.type === "sandbox.command.finished");
     const stepStarted = events.find((event) => event.type === "step.started");
+    const jobUpdatedEvents = events.filter((event) => event.type === "job.updated");
     const jobFinished = events.find((event) => event.type === "job.finished");
 
+    assert.equal(jobUpdatedEvents.length > 0, true);
+    assert.equal(
+      jobUpdatedEvents.every((event) => event.payload.traceId === rootTraceContext.traceId),
+      true
+    );
+    assert.equal(
+      jobUpdatedEvents.every((event) => event.payload.spanId === rootTraceContext.spanId),
+      true
+    );
     assert.equal(stepStarted?.payload.traceId, rootTraceContext.traceId);
     assert.equal(stepStarted?.payload.spanId, rootTraceContext.spanId);
     assert.equal(jobFinished?.payload.spanId, rootTraceContext.spanId);

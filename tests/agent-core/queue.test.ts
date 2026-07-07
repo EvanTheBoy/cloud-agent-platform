@@ -64,6 +64,56 @@ describe("InMemoryJobQueue", () => {
     assert.deepEqual(handlerTraceContext, workerTraceContext);
     assert.deepEqual(events[2]?.traceContext, workerTraceContext);
   });
+
+  it("runs the handler when recording queue.active fails", async () => {
+    const originalConsoleError = console.error;
+    let handledJobId: string | undefined;
+    const queue = new InMemoryJobQueue(1, async (event) => {
+      if (event.type === "queue.active") {
+        throw new Error("store unavailable");
+      }
+    });
+
+    try {
+      console.error = () => {};
+      queue.process(async (jobId) => {
+        handledJobId = jobId;
+        return { status: "succeeded" };
+      });
+      await queue.enqueue("job-1");
+      await eventually(() => {
+        assert.equal(handledJobId, "job-1");
+      });
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
+
+  it("does not turn handler success into queue.failed when recording queue.completed fails", async () => {
+    const events: QueueEvent[] = [];
+    const originalConsoleError = console.error;
+    const queue = new InMemoryJobQueue(1, async (event) => {
+      events.push(event);
+      if (event.type === "queue.completed") {
+        throw new Error("store unavailable");
+      }
+    });
+
+    try {
+      console.error = () => {};
+      queue.process(async () => ({ status: "succeeded" }));
+      await queue.enqueue("job-1");
+      await waitForEvents(events, 3);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    assert.deepEqual(
+      events.map((event) => event.type),
+      ["queue.enqueued", "queue.active", "queue.completed"]
+    );
+  });
 });
 
 describe("parseRedisConnection", () => {
@@ -130,6 +180,35 @@ describe("BullMqJobQueue", () => {
     assert.equal(typeof (result as Record<string, unknown>).traceContext, "object");
   });
 
+  it("preserves the original processor error when trace tagging fails", async () => {
+    const queue = Object.create(BullMqJobQueue.prototype) as unknown as {
+      emitEvent: () => Promise<void>;
+      processJob: (
+        job: { data: { jobId: string; traceContext?: { traceId: string; spanId: string } }; attemptsMade: number },
+        handler: JobHandler
+      ) => Promise<JobHandlerResult>;
+    };
+    const frozenError = Object.freeze(new Error("original processor failure"));
+    queue.emitEvent = async () => {};
+
+    await assert.rejects(
+      () =>
+        queue.processJob(
+          {
+            data: {
+              jobId: "job-1",
+              traceContext: { traceId: "trace-1", spanId: "queue-span" }
+            },
+            attemptsMade: 0
+          },
+          async () => {
+            throw frozenError;
+          }
+        ),
+      /original processor failure/
+    );
+  });
+
   it("does not fail enqueue after Redis add succeeds when recording queue.enqueued fails", async () => {
     const queue = Object.create(BullMqJobQueue.prototype) as unknown as {
       queue: { add: (...args: unknown[]) => Promise<void> };
@@ -179,4 +258,18 @@ async function waitForEvents(events: QueueEvent[], count: number): Promise<void>
   while (events.length < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+async function eventually(assertion: () => void): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  }
+  throw lastError;
 }

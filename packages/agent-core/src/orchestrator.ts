@@ -54,7 +54,7 @@ export class AgentOrchestrator {
 
     try {
       await this.options.sandbox.validateWorkspace(job.id, job.workspacePath);
-      job = await this.options.store.update(job.id, { status: "running" });
+      job = await this.options.store.update(job.id, { status: "running" }, runTraceContext);
       recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
 
       const messages: AgentMessage[] = [
@@ -157,7 +157,7 @@ export class AgentOrchestrator {
         job = await this.options.store.update(job.id, {
           steps: [...job.steps, persistedStep],
           result: result.final ?? job.result
-        });
+        }, runTraceContext);
 
         await this.options.store.appendEvent({
           type: "step.finished",
@@ -174,7 +174,7 @@ export class AgentOrchestrator {
           job = await this.options.store.update(job.id, {
             status: "succeeded",
             result: result.final
-          });
+          }, runTraceContext);
           recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
           recordObservation(this.options.metrics, "agent_job_duration_ms", Date.now() - jobStartedAt, { status: job.status });
           await this.options.store.appendEvent({
@@ -197,7 +197,7 @@ export class AgentOrchestrator {
       job = await this.options.store.update(job.id, {
         status: "failed",
         error: message
-      });
+      }, runTraceContext);
       recordIncrement(this.options.metrics, "agent_jobs_total", { status: job.status });
       recordObservation(this.options.metrics, "agent_job_duration_ms", Date.now() - jobStartedAt, { status: job.status });
       await this.options.store.appendEvent({

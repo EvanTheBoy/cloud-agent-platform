@@ -34,7 +34,7 @@ export class InMemoryJobQueue implements JobQueue {
   async enqueue(jobId: string, traceContext?: TraceContext): Promise<void> {
     const queueTraceContext = createChildTraceContext(traceContext);
     this.pending.push({ jobId, queueTraceContext });
-    await this.emitEvent({ type: "queue.enqueued", jobId, traceContext: queueTraceContext });
+    await this.emitEventSafely({ type: "queue.enqueued", jobId, traceContext: queueTraceContext });
     queueMicrotask(() => this.drain());
   }
 
@@ -43,11 +43,11 @@ export class InMemoryJobQueue implements JobQueue {
       let workerTraceContext: TraceContext | undefined;
       void (async () => {
         workerTraceContext = createChildTraceContext(pendingJob.queueTraceContext);
-        await this.emitEvent({ type: "queue.active", jobId: pendingJob.jobId, traceContext: workerTraceContext });
+        await this.emitEventSafely({ type: "queue.active", jobId: pendingJob.jobId, traceContext: workerTraceContext });
         const result = await handler(pendingJob.jobId, workerTraceContext);
         const finalStatus = getHandlerFinalStatus(result);
         if (finalStatus === "failed") {
-          await this.emitEvent({
+          await this.emitEventSafely({
             type: "queue.failed",
             jobId: pendingJob.jobId,
             traceContext: workerTraceContext,
@@ -59,7 +59,7 @@ export class InMemoryJobQueue implements JobQueue {
           });
           return;
         }
-        await this.emitEvent({
+        await this.emitEventSafely({
           type: "queue.completed",
           jobId: pendingJob.jobId,
           traceContext: workerTraceContext,
@@ -67,13 +67,11 @@ export class InMemoryJobQueue implements JobQueue {
         });
       })()
         .catch((error: unknown) => {
-          void this.emitEvent({
+          void this.emitEventSafely({
             type: "queue.failed",
             jobId: pendingJob.jobId,
             traceContext: workerTraceContext ?? createChildTraceContext(pendingJob.queueTraceContext),
             payload: { failureKind: "processor", error: errorMessage(error) }
-          }).catch((emitError: unknown) => {
-            console.error("Failed to record in-memory queue failed event", emitError);
           });
         })
         .finally(() => {
@@ -97,6 +95,14 @@ export class InMemoryJobQueue implements JobQueue {
 
   private async emitEvent(event: QueueEvent): Promise<void> {
     await this.onEvent?.(event);
+  }
+
+  private async emitEventSafely(event: QueueEvent): Promise<void> {
+    try {
+      await this.emitEvent(event);
+    } catch (error) {
+      console.error("Failed to record in-memory queue event", { event, error });
+    }
   }
 }
 
@@ -306,11 +312,15 @@ function errorMessage(error: unknown): string {
 
 function tagErrorWithTraceContext(error: unknown, traceContext: TraceContext): void {
   if (error && (typeof error === "object" || typeof error === "function")) {
-    Object.defineProperty(error, TRACE_CONTEXT_ERROR_PROPERTY, {
-      value: traceContext,
-      enumerable: false,
-      configurable: true
-    });
+    try {
+      Object.defineProperty(error, TRACE_CONTEXT_ERROR_PROPERTY, {
+        value: traceContext,
+        enumerable: false,
+        configurable: true
+      });
+    } catch {
+      // Preserve the original processor error if the thrown value rejects mutation.
+    }
   }
 }
 
