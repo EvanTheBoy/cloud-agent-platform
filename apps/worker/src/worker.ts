@@ -1,10 +1,11 @@
 import { loadEnvFile } from "../../api/src/env.js";
-import { loadRuntimeConfig } from "../../api/src/config.js";
+import { loadWorkerConfig } from "../../api/src/config.js";
 import { closeAgentRuntime, createWorkerRuntime } from "../../api/src/runtime.js";
+import { closeWorkerMetricsServer, startWorkerMetricsServer } from "./metrics-server.js";
 
 loadEnvFile();
 
-const config = loadRuntimeConfig();
+const config = loadWorkerConfig();
 
 if (config.queueDriver !== "bullmq") {
   throw new Error("Worker process requires QUEUE_DRIVER=bullmq");
@@ -15,6 +16,10 @@ if (config.storeDriver !== "postgres") {
 }
 
 const runtime = await createWorkerRuntime(config);
+const metricsServer = await startWorkerMetricsServer(runtime.metrics, {
+  host: config.metricsHost,
+  port: config.metricsPort
+});
 let closing = false;
 
 runtime.queue.process(async (jobId) => {
@@ -24,7 +29,8 @@ runtime.queue.process(async (jobId) => {
 console.log("Worker started", {
   queueDriver: config.queueDriver,
   storeDriver: config.storeDriver,
-  jobConcurrency: config.jobConcurrency
+  jobConcurrency: config.jobConcurrency,
+  metrics: `http://${config.metricsHost}:${config.metricsPort}/metrics`
 });
 
 const shutdown = async (signal: NodeJS.Signals) => {
@@ -33,6 +39,7 @@ const shutdown = async (signal: NodeJS.Signals) => {
   }
   closing = true;
   console.log(`Received ${signal}, shutting down worker`);
+  await closeWorkerMetricsServer(metricsServer);
   await closeAgentRuntime(runtime);
 };
 

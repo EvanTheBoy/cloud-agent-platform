@@ -28,6 +28,17 @@ describe("InMemoryMetricsRecorder", () => {
 
     assert.equal(metrics.renderPrometheus(), '_1_invalid_name{bad_label="quote\\" newline\\n slash\\\\"} 1\n');
   });
+
+  it("keeps distinct label sets separate when values contain key delimiters", () => {
+    const metrics = new InMemoryMetricsRecorder();
+
+    metrics.increment("agent_collision_total", { a: "b,c=d" });
+    metrics.increment("agent_collision_total", { a: "b", c: "d" });
+
+    const rendered = metrics.renderPrometheus();
+    assert.match(rendered, /agent_collision_total\{a="b",c="d"\} 1/);
+    assert.match(rendered, /agent_collision_total\{a="b,c=d"\} 1/);
+  });
 });
 
 describe("InstrumentedJobStore", () => {

@@ -213,10 +213,10 @@ function truncateLabelValue(value: string): string {
 }
 
 function metricKey(name: string, labels: Record<string, string>): string {
-  return `${name}:${Object.entries(labels)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}=${value}`)
-    .join(",")}`;
+  return JSON.stringify([
+    name,
+    Object.entries(labels).sort(([left], [right]) => left.localeCompare(right))
+  ]);
 }
 
 function formatPrometheusSample(name: string, labels: Record<string, string>, value: number): string {
