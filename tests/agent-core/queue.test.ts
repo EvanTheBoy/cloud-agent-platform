@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { BullMqJobQueue, InMemoryJobQueue } from "../../packages/agent-core/src/queue.js";
 import { parseRedisConnection } from "../../packages/agent-core/src/redis-connection.js";
+import { createRootTraceContext } from "../../packages/agent-core/src/trace.js";
 import type { QueueEvent } from "../../packages/agent-core/src/queue.js";
 import type { JobHandler, JobHandlerResult } from "../../packages/agent-core/src/types.js";
 
@@ -36,6 +37,32 @@ describe("InMemoryJobQueue", () => {
 
     assert.equal(events[2]?.type, "queue.completed");
     assert.equal(events[2]?.payload?.finalStatus, "succeeded");
+  });
+
+  it("propagates trace context from enqueue to worker events and handler", async () => {
+    const events: QueueEvent[] = [];
+    const rootTraceContext = createRootTraceContext();
+    let handlerTraceContext;
+    const queue = new InMemoryJobQueue(1, async (event) => {
+      events.push(event);
+    });
+
+    queue.process(async (_jobId, traceContext) => {
+      handlerTraceContext = traceContext;
+      return { status: "succeeded" };
+    });
+    await queue.enqueue("job-1", rootTraceContext);
+    await waitForEvents(events, 3);
+
+    const queueTraceContext = events[0]?.traceContext;
+    const workerTraceContext = events[1]?.traceContext;
+
+    assert.equal(queueTraceContext?.traceId, rootTraceContext.traceId);
+    assert.equal(queueTraceContext?.parentSpanId, rootTraceContext.spanId);
+    assert.equal(workerTraceContext?.traceId, rootTraceContext.traceId);
+    assert.equal(workerTraceContext?.parentSpanId, queueTraceContext?.spanId);
+    assert.deepEqual(handlerTraceContext, workerTraceContext);
+    assert.deepEqual(events[2]?.traceContext, workerTraceContext);
   });
 });
 
@@ -96,7 +123,11 @@ describe("BullMqJobQueue", () => {
     }
 
     assert.equal(handledJobId, "job-1");
-    assert.deepEqual(result, { finalStatus: "succeeded", error: undefined });
+    assert.equal(result?.status, undefined);
+    assert.equal("finalStatus" in (result as Record<string, unknown>), true);
+    assert.equal((result as Record<string, unknown>).finalStatus, "succeeded");
+    assert.equal((result as Record<string, unknown>).error, undefined);
+    assert.equal(typeof (result as Record<string, unknown>).traceContext, "object");
   });
 
   it("does not fail enqueue after Redis add succeeds when recording queue.enqueued fails", async () => {

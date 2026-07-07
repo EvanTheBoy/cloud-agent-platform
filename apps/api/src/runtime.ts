@@ -11,9 +11,10 @@ import {
   recordIncrement,
   recordObservation,
   sanitizeDiagnosticValue,
+  tracePayloadFields,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
-import type { JobQueue, JobStore, LlmProvider, MetricsRecorder } from "../../../packages/agent-core/src/index.js";
+import type { JobQueue, JobStore, LlmProvider, MetricsRecorder, QueueEvent } from "../../../packages/agent-core/src/index.js";
 import type { Sandbox } from "../../../packages/agent-core/src/types.js";
 import { DockerSandbox, LocalSandbox } from "../../../packages/sandbox/src/index.js";
 import type { AppOptions } from "./app.js";
@@ -86,17 +87,16 @@ async function createJobStore(options: AppOptions): Promise<{ store: JobStore; d
 function createJobQueue(options: AppOptions, store: JobStore, metrics: MetricsRecorder): JobQueue {
   const queueDriver = options.queueDriver === "bullmq" ? "bullmq" : "memory";
   const enqueuedAtByJobId = new Map<string, number>();
-  const onEvent = async (event: {
-    type: "queue.enqueued" | "queue.active" | "queue.completed" | "queue.attempt_failed" | "queue.failed";
-    jobId: string;
-    payload?: Record<string, unknown>;
-  }) => {
+  const onEvent = async (event: QueueEvent) => {
     recordQueueMetrics(metrics, queueDriver, enqueuedAtByJobId, event);
     await store.appendEvent({
       type: event.type,
       jobId: event.jobId,
       timestamp: new Date().toISOString(),
-      payload: (event.payload ? sanitizeDiagnosticValue(event.payload) : {}) as Record<string, unknown>
+      payload: {
+        ...((event.payload ? sanitizeDiagnosticValue(event.payload) : {}) as Record<string, unknown>),
+        ...tracePayloadFields(event.traceContext)
+      }
     });
   };
 

@@ -54,11 +54,16 @@ The platform currently records:
   and job store operations. In BullMQ mode, scrape both the API process and the
   standalone worker process because worker-owned LLM/tool/sandbox/orchestrator
   metrics are not present in the API process.
+- Trace/span context is propagated through API job creation, queue enqueue,
+  worker execution, LLM calls, tool execution, and sandbox commands. Job events
+  include `traceId`, `spanId`, and `parentSpanId` in their payloads when a trace
+  context is available. BullMQ job data carries the queue span across the
+  API/worker process boundary.
 
 This is enough to see that a job failed and to diagnose malformed
 OpenAI-compatible tool-call arguments, thrown tool errors, and sandbox command
-execution behavior. Distributed tracing across API, queue, worker, LLM, and
-sandbox boundaries is still incomplete.
+execution behavior, while reconstructing the in-platform trace tree from
+persisted job events.
 
 ## Observability Goals
 

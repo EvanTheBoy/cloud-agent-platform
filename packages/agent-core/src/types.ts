@@ -69,9 +69,16 @@ export interface JobEvent {
   payload: Record<string, unknown>;
 }
 
+export interface TraceContext {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+}
+
 export interface CreateJobInput {
   id?: string;
   task: string;
+  traceContext?: TraceContext;
 }
 
 export interface JobStore {
@@ -85,14 +92,14 @@ export interface JobStore {
 }
 
 export interface JobQueue {
-  enqueue(jobId: string): Promise<void>;
+  enqueue(jobId: string, traceContext?: TraceContext): Promise<void>;
   process(handler: JobHandler): void;
   close?(): Promise<void>;
 }
 
 export type JobHandlerResult = { status?: JobStatus; error?: string } | void;
 
-export type JobHandler = (jobId: string) => Promise<JobHandlerResult>;
+export type JobHandler = (jobId: string, traceContext?: TraceContext) => Promise<JobHandlerResult>;
 
 export interface SandboxCommand {
   command: string;

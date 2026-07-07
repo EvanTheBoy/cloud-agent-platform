@@ -22,8 +22,8 @@ const metricsServer = await startWorkerMetricsServer(runtime.metrics, {
 });
 let closing = false;
 
-runtime.queue.process(async (jobId) => {
-  return runtime.orchestrator.run(jobId);
+runtime.queue.process(async (jobId, traceContext) => {
+  return runtime.orchestrator.run(jobId, traceContext);
 });
 
 console.log("Worker started", {

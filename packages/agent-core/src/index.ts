@@ -6,4 +6,5 @@ export * from "./postgres-store.js";
 export * from "./queue.js";
 export * from "./store.js";
 export * from "./tools.js";
+export * from "./trace.js";
 export * from "./types.js";

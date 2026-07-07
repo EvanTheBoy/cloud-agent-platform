@@ -2,7 +2,8 @@ import { EventEmitter } from "node:events";
 import { Queue, Worker } from "bullmq";
 import type { ConnectionOptions } from "bullmq";
 import { parseRedisConnection } from "./redis-connection.js";
-import type { JobHandler, JobHandlerResult, JobQueue, JobStatus } from "./types.js";
+import { createChildTraceContext, isTraceContext } from "./trace.js";
+import type { JobHandler, JobHandlerResult, JobQueue, JobStatus, TraceContext } from "./types.js";
 
 export type QueueEventType =
   | "queue.enqueued"
@@ -14,6 +15,7 @@ export type QueueEventType =
 export interface QueueEvent {
   type: QueueEventType;
   jobId: string;
+  traceContext?: TraceContext;
   payload?: Record<string, unknown>;
 }
 
@@ -22,29 +24,33 @@ export type QueueEventHandler = (event: QueueEvent) => void | Promise<void>;
 export class InMemoryJobQueue implements JobQueue {
   private readonly events = new EventEmitter();
   private active = 0;
-  private readonly pending: string[] = [];
+  private readonly pending: PendingJob[] = [];
 
   constructor(
     private readonly concurrency = 2,
     private readonly onEvent?: QueueEventHandler
   ) {}
 
-  async enqueue(jobId: string): Promise<void> {
-    this.pending.push(jobId);
-    await this.emitEvent({ type: "queue.enqueued", jobId });
+  async enqueue(jobId: string, traceContext?: TraceContext): Promise<void> {
+    const queueTraceContext = createChildTraceContext(traceContext);
+    this.pending.push({ jobId, queueTraceContext });
+    await this.emitEvent({ type: "queue.enqueued", jobId, traceContext: queueTraceContext });
     queueMicrotask(() => this.drain());
   }
 
   process(handler: JobHandler): void {
-    this.events.on("job", (jobId: string) => {
+    this.events.on("job", (pendingJob: PendingJob) => {
+      let workerTraceContext: TraceContext | undefined;
       void (async () => {
-        await this.emitEvent({ type: "queue.active", jobId });
-        const result = await handler(jobId);
+        workerTraceContext = createChildTraceContext(pendingJob.queueTraceContext);
+        await this.emitEvent({ type: "queue.active", jobId: pendingJob.jobId, traceContext: workerTraceContext });
+        const result = await handler(pendingJob.jobId, workerTraceContext);
         const finalStatus = getHandlerFinalStatus(result);
         if (finalStatus === "failed") {
           await this.emitEvent({
             type: "queue.failed",
-            jobId,
+            jobId: pendingJob.jobId,
+            traceContext: workerTraceContext,
             payload: {
               failureKind: "business",
               finalStatus,
@@ -55,14 +61,16 @@ export class InMemoryJobQueue implements JobQueue {
         }
         await this.emitEvent({
           type: "queue.completed",
-          jobId,
+          jobId: pendingJob.jobId,
+          traceContext: workerTraceContext,
           payload: { finalStatus: finalStatus ?? "unknown" }
         });
       })()
         .catch((error: unknown) => {
           void this.emitEvent({
             type: "queue.failed",
-            jobId,
+            jobId: pendingJob.jobId,
+            traceContext: workerTraceContext ?? createChildTraceContext(pendingJob.queueTraceContext),
             payload: { failureKind: "processor", error: errorMessage(error) }
           }).catch((emitError: unknown) => {
             console.error("Failed to record in-memory queue failed event", emitError);
@@ -78,12 +86,12 @@ export class InMemoryJobQueue implements JobQueue {
 
   private drain(): void {
     while (this.active < this.concurrency && this.pending.length > 0) {
-      const jobId = this.pending.shift();
-      if (!jobId) {
+      const pendingJob = this.pending.shift();
+      if (!pendingJob) {
         return;
       }
       this.active += 1;
-      this.events.emit("job", jobId);
+      this.events.emit("job", pendingJob);
     }
   }
 
@@ -104,8 +112,8 @@ export interface BullMqJobQueueOptions {
 
 export class BullMqJobQueue implements JobQueue {
   private readonly connection: ConnectionOptions;
-  private readonly queue: Queue<{ jobId: string }, QueueHandlerResult>;
-  private worker?: Worker<{ jobId: string }, QueueHandlerResult>;
+  private readonly queue: Queue<QueueJobData, QueueHandlerResult>;
+  private worker?: Worker<QueueJobData, QueueHandlerResult>;
   private readonly maxAttempts: number;
   private readonly concurrency: number;
   private readonly removeOnComplete: BullMqJobRetention;
@@ -115,7 +123,7 @@ export class BullMqJobQueue implements JobQueue {
   constructor(options: BullMqJobQueueOptions) {
     const queueName = options.queueName ?? "agent-jobs";
     this.connection = parseRedisConnection(options.redisUrl);
-    this.queue = new Queue<{ jobId: string }, QueueHandlerResult>(queueName, {
+    this.queue = new Queue<QueueJobData, QueueHandlerResult>(queueName, {
       connection: this.connection
     });
     this.queue.on("error", (error) => {
@@ -128,10 +136,11 @@ export class BullMqJobQueue implements JobQueue {
     this.onEvent = options.onEvent;
   }
 
-  async enqueue(jobId: string): Promise<void> {
+  async enqueue(jobId: string, traceContext?: TraceContext): Promise<void> {
+    const queueTraceContext = createChildTraceContext(traceContext);
     await this.queue.add(
       "agent-job",
-      { jobId },
+      { jobId, traceContext: queueTraceContext },
       {
         jobId,
         attempts: this.maxAttempts,
@@ -146,6 +155,7 @@ export class BullMqJobQueue implements JobQueue {
     await this.emitEventSafely({
       type: "queue.enqueued",
       jobId,
+      traceContext: queueTraceContext,
       payload: { driver: "bullmq", maxAttempts: this.maxAttempts }
     });
   }
@@ -155,7 +165,7 @@ export class BullMqJobQueue implements JobQueue {
       throw new Error("BullMQ processor has already been registered");
     }
 
-    this.worker = new Worker<{ jobId: string }, QueueHandlerResult>(
+    this.worker = new Worker<QueueJobData, QueueHandlerResult>(
       this.queue.name,
       async (job) => {
         return this.processJob(job, handler);
@@ -176,6 +186,7 @@ export class BullMqJobQueue implements JobQueue {
       void this.emitEvent({
         type: failed ? "queue.failed" : "queue.completed",
         jobId: job.data.jobId,
+        traceContext: job.returnvalue?.traceContext ?? job.data.traceContext,
         payload: {
           driver: "bullmq",
           attemptsMade: job.attemptsMade,
@@ -201,6 +212,7 @@ export class BullMqJobQueue implements JobQueue {
       void this.emitEvent({
         type: willRetry ? "queue.attempt_failed" : "queue.failed",
         jobId: job?.data.jobId ?? "unknown",
+        traceContext: traceContextFromError(error) ?? job?.data.traceContext,
         payload: {
           driver: "bullmq",
           attemptsMade,
@@ -233,19 +245,29 @@ export class BullMqJobQueue implements JobQueue {
   }
 
   private async processJob(
-    job: { data: { jobId: string }; attemptsMade: number },
+    job: { data: QueueJobData; attemptsMade: number },
     handler: JobHandler
   ): Promise<QueueHandlerResult> {
     const jobId = job.data.jobId;
+    const queueTraceContext = isTraceContext(job.data.traceContext) ? job.data.traceContext : undefined;
+    const workerTraceContext = createChildTraceContext(queueTraceContext);
     await this.emitEventSafely({
       type: "queue.active",
       jobId,
+      traceContext: workerTraceContext,
       payload: { driver: "bullmq", attempt: job.attemptsMade + 1 }
     });
-    const result = await handler(jobId);
+    let result: JobHandlerResult;
+    try {
+      result = await handler(jobId, workerTraceContext);
+    } catch (error) {
+      tagErrorWithTraceContext(error, workerTraceContext);
+      throw error;
+    }
     return {
       finalStatus: getHandlerFinalStatus(result),
-      error: getHandlerError(result)
+      error: getHandlerError(result),
+      traceContext: workerTraceContext
     };
   }
 }
@@ -253,7 +275,20 @@ export class BullMqJobQueue implements JobQueue {
 interface QueueHandlerResult {
   finalStatus?: JobStatus;
   error?: string;
+  traceContext?: TraceContext;
 }
+
+interface QueueJobData {
+  jobId: string;
+  traceContext?: TraceContext;
+}
+
+interface PendingJob {
+  jobId: string;
+  queueTraceContext: TraceContext;
+}
+
+const TRACE_CONTEXT_ERROR_PROPERTY = "__cloudAgentTraceContext";
 
 export type BullMqJobRetention = false | { age: number; count?: number } | { count: number };
 
@@ -267,4 +302,23 @@ function getHandlerError(result: JobHandlerResult): string | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function tagErrorWithTraceContext(error: unknown, traceContext: TraceContext): void {
+  if (error && (typeof error === "object" || typeof error === "function")) {
+    Object.defineProperty(error, TRACE_CONTEXT_ERROR_PROPERTY, {
+      value: traceContext,
+      enumerable: false,
+      configurable: true
+    });
+  }
+}
+
+function traceContextFromError(error: unknown): TraceContext | undefined {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) {
+    return undefined;
+  }
+
+  const value = (error as Record<string, unknown>)[TRACE_CONTEXT_ERROR_PROPERTY];
+  return isTraceContext(value) ? value : undefined;
 }

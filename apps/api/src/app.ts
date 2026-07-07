@@ -4,7 +4,7 @@ import Fastify from "fastify";
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { diagnosticTextFields } from "../../../packages/agent-core/src/index.js";
+import { createRootTraceContext, diagnosticTextFields, tracePayloadFields } from "../../../packages/agent-core/src/index.js";
 import type { MetricsRecorder } from "../../../packages/agent-core/src/index.js";
 import { closeAgentRuntime, createApiRuntime, createWorkerRuntime } from "./runtime.js";
 import type { ApiRuntime, WorkerRuntime } from "./runtime.js";
@@ -58,8 +58,8 @@ export async function buildApp(options: AppOptions) {
   const { store, queue, sandbox } = runtime;
 
   if (isWorkerRuntime(runtime)) {
-    queue.process(async (jobId) => {
-      return runtime.orchestrator.run(jobId);
+    queue.process(async (jobId, traceContext) => {
+      return runtime.orchestrator.run(jobId, traceContext);
     });
   }
 
@@ -84,11 +84,12 @@ export async function buildApp(options: AppOptions) {
       parsed.sourcePath ?? options.defaultSourcePath ?? process.cwd(),
       options.allowedSourceRoot ?? options.defaultSourcePath ?? process.cwd()
     );
+    const traceContext = createRootTraceContext();
     const workspacePath = await sandbox.prepare(jobId);
     await sandbox.importDirectory(jobId, sourcePath);
-    const job = await store.create({ id: jobId, task: parsed.task, workspacePath });
+    const job = await store.create({ id: jobId, task: parsed.task, workspacePath, traceContext });
     try {
-      await queue.enqueue(job.id);
+      await queue.enqueue(job.id, traceContext);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const failedJob = await store.update(job.id, {
@@ -101,6 +102,7 @@ export async function buildApp(options: AppOptions) {
         timestamp: new Date().toISOString(),
         payload: {
           status: failedJob.status,
+          ...tracePayloadFields(traceContext),
           ...diagnosticTextFields("error", failedJob.error ?? ""),
           failureKind: "enqueue"
         }

@@ -163,6 +163,60 @@ describe("AgentOrchestrator", () => {
     assert.match(metrics.renderPrometheus(), /agent_jobs_total\{status="failed"\} 1/);
   });
 
+  it("persists a single trace tree across worker, LLM, tool, and sandbox spans", async () => {
+    const store = new InMemoryJobStore();
+    const rootTraceContext = {
+      traceId: "trace-test",
+      spanId: "worker-span",
+      parentSpanId: "queue-span"
+    };
+    const job = await store.create({
+      id: "job-trace-tree",
+      task: "inspect files",
+      workspacePath: "/workspace/job-trace-tree"
+    });
+    const orchestrator = new AgentOrchestrator({
+      store,
+      sandbox: new SuccessfulCommandSandbox(),
+      llm: new DiagnosticLlmProvider({
+        message: "I will inspect the workspace.",
+        toolCalls: [
+          {
+            id: "call-1",
+            name: "shell.exec",
+            input: { command: "sh", args: ["-lc", "echo ok"] }
+          }
+        ]
+      }),
+      tools: [shellExecTool],
+      maxSteps: 1
+    });
+
+    await orchestrator.run(job.id, rootTraceContext);
+    const events = await store.getEvents(job.id);
+    const llmStarted = events.find((event) => event.type === "llm.request.started");
+    const llmReceived = events.find((event) => event.type === "llm.response.received");
+    const toolStarted = events.find((event) => event.type === "tool.started");
+    const toolFinished = events.find((event) => event.type === "tool.finished");
+    const sandboxStarted = events.find((event) => event.type === "sandbox.command.started");
+    const sandboxFinished = events.find((event) => event.type === "sandbox.command.finished");
+    const stepStarted = events.find((event) => event.type === "step.started");
+    const jobFinished = events.find((event) => event.type === "job.finished");
+
+    assert.equal(stepStarted?.payload.traceId, rootTraceContext.traceId);
+    assert.equal(stepStarted?.payload.spanId, rootTraceContext.spanId);
+    assert.equal(jobFinished?.payload.spanId, rootTraceContext.spanId);
+    assert.equal(llmStarted?.payload.traceId, rootTraceContext.traceId);
+    assert.equal(llmStarted?.payload.parentSpanId, rootTraceContext.spanId);
+    assert.equal(llmReceived?.payload.spanId, llmStarted?.payload.spanId);
+    assert.equal(toolStarted?.payload.traceId, rootTraceContext.traceId);
+    assert.equal(toolStarted?.payload.parentSpanId, rootTraceContext.spanId);
+    assert.equal(toolFinished?.payload.spanId, toolStarted?.payload.spanId);
+    assert.equal(sandboxStarted?.payload.traceId, rootTraceContext.traceId);
+    assert.equal(sandboxStarted?.payload.parentSpanId, toolStarted?.payload.spanId);
+    assert.equal(sandboxFinished?.payload.spanId, sandboxStarted?.payload.spanId);
+  });
+
   it("persists tool failure diagnostics when a tool throws", async () => {
     const store = new InMemoryJobStore();
     const job = await store.create({
@@ -692,6 +746,36 @@ class StaticLlmProvider implements LlmProvider {
   constructor(private readonly response: LlmResponse) {}
 
   async complete(): Promise<LlmResponse> {
+    return this.response;
+  }
+}
+
+class DiagnosticLlmProvider implements LlmProvider {
+  constructor(private readonly response: LlmResponse) {}
+
+  async complete(
+    _messages: Parameters<LlmProvider["complete"]>[0],
+    _tools: Parameters<LlmProvider["complete"]>[1],
+    diagnostics?: Parameters<LlmProvider["complete"]>[2]
+  ): Promise<LlmResponse> {
+    await diagnostics?.({
+      type: "llm.request.started",
+      payload: {
+        provider: "test",
+        model: "test-model",
+        messageCount: 2,
+        toolCount: 1
+      }
+    });
+    await diagnostics?.({
+      type: "llm.response.received",
+      payload: {
+        provider: "test",
+        model: "test-model",
+        status: 200,
+        durationMs: 1
+      }
+    });
     return this.response;
   }
 }
