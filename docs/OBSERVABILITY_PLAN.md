@@ -1,8 +1,8 @@
 # Observability Plan
 
-This document records the current observability gap found while verifying the
-Postgres job store and outlines the next production upgrade area: structured
-diagnostics for agent, LLM, tool, queue, and storage behavior.
+This document records the observability gap found while verifying the Postgres
+job store and tracks the production upgrade path for structured diagnostics,
+metrics, and trace correlation across agent runtime behavior.
 
 ## Why This Matters
 
@@ -302,7 +302,9 @@ commands made through `sandbox.exec`.
 ### Phase 3: Metrics And Tracing
 
 Status: process-level metrics are implemented with a dependency-free in-memory
-recorder and Prometheus text rendering. Distributed tracing is still pending.
+recorder and Prometheus text rendering. In-platform trace/span context is
+implemented across API job creation, queue enqueue, worker execution, LLM calls,
+tool execution, and sandbox commands.
 
 The in-memory recorder is intentional for the current phase: it keeps metrics
 dependency-free, matches Prometheus' scrape-current-process model, and makes
@@ -314,7 +316,8 @@ should scrape each long-running process separately.
 Implemented process-level metrics:
 
 - Job counts by status.
-- Queue lifecycle event counts.
+- Queue lifecycle event counts, labeled with final job status and failure kind
+  where available.
 - Queue latency when enqueue and activation are observed in the same process.
 - Agent step duration.
 - LLM latency and failure count by provider/model.
@@ -323,7 +326,23 @@ Implemented process-level metrics:
 - Sandbox command duration, failure count, and timeout count.
 - Job store operation latency and failure count by store driver/operation.
 
-Future metrics upgrade path:
+Implemented trace context propagation:
+
+- API creates a root trace context when a job is accepted.
+- Queue enqueue creates a queue span. BullMQ persists that queue span in job data
+  so the standalone worker can continue the same trace.
+- Worker execution creates a worker span under the queue span.
+- LLM, tool, and sandbox diagnostics create child spans under the worker or tool
+  span as appropriate.
+- Job events include `traceId`, `spanId`, and `parentSpanId` in payloads when a
+  trace context is available, including job creation, job updates, queue events,
+  LLM diagnostics, tool diagnostics, sandbox command diagnostics, step events,
+  and job completion events.
+- Queue and diagnostic event writes are best-effort so observability persistence
+  failures do not prevent job execution after the durable queue or runtime
+  operation has already succeeded.
+
+Future observability upgrade path:
 
 1. Keep `MetricsRecorder` as the instrumentation boundary so agent, queue, LLM,
    tool, sandbox, and store code do not depend directly on a specific metrics
@@ -337,10 +356,12 @@ Future metrics upgrade path:
    registry. The existing in-memory recorder should remain useful for local
    development and tests, while production wiring injects the exporter-backed
    recorder through `AppOptions.metrics`.
-4. When OpenTelemetry is introduced, add trace context propagation across API,
-   queue, worker, LLM, tool, and sandbox boundaries so metrics can be correlated
-   with distributed traces and persisted job events.
-5. Keep metric names and label sets stable during the migration. New backends
+4. When OpenTelemetry is introduced, map the current `TraceContext` and event
+   span boundaries onto OpenTelemetry spans and exporters instead of changing the
+   job-event trace payload shape first.
+5. Add structured fallback logs or metrics for failed best-effort event writes,
+   especially queue event persistence failures and diagnostic append failures.
+6. Keep metric names and label sets stable during the migration. New backends
    should preserve the current semantic names unless a deliberate versioned
    rename is documented.
 
@@ -359,7 +380,9 @@ No persisted event should expose API keys or authorization secrets.
 
 ## Current Follow-Up
 
-The immediate next observability task is distributed tracing across API, queue,
-worker, LLM, and sandbox boundaries. The current metrics are process-local, so
-BullMQ API/worker deployments need each process scraped separately until an
-OpenTelemetry exporter or central metrics backend is introduced.
+The immediate next observability task is productionizing the implemented
+instrumentation. The current metrics are process-local, so BullMQ API/worker
+deployments need each process scraped separately until an OpenTelemetry exporter
+or central metrics backend is introduced. Trace context is persisted in job
+events today; the next tracing step is exporting those span boundaries to an
+external collector without breaking the existing job-event reconstruction path.
