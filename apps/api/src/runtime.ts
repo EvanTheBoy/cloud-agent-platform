@@ -171,7 +171,12 @@ function recordQueueMetrics(
   recordIncrement(metrics, "agent_queue_events_total", {
     driver: queueDriver,
     event: queueEvent,
-    status: typeof event.payload?.status === "string" ? event.payload.status : undefined,
+    status:
+      typeof event.payload?.finalStatus === "string"
+        ? event.payload.finalStatus
+        : typeof event.payload?.status === "string"
+          ? event.payload.status
+          : undefined,
     failureKind: typeof event.payload?.failureKind === "string" ? event.payload.failureKind : undefined
   });
 
