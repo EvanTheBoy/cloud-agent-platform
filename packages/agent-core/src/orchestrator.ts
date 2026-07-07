@@ -11,11 +11,16 @@ import type {
   Tool,
   ToolCall
 } from "./types.js";
-import { previewDiagnosticText, redactSensitiveText, sanitizeDiagnosticValue } from "./diagnostics.js";
+import {
+  DIAGNOSTIC_TEXT_PREVIEW_LIMIT,
+  diagnosticTextFields,
+  previewDiagnosticText,
+  redactSensitiveText,
+  sanitizeDiagnosticValue
+} from "./diagnostics.js";
 
 const now = () => new Date().toISOString();
 const OUTPUT_TRUNCATED_MARKER = "\n[output truncated]\n";
-const OBSERVATION_PREVIEW_LIMIT = 4000;
 
 export interface AgentOrchestratorOptions {
   store: JobStore;
@@ -145,8 +150,7 @@ export class AgentOrchestrator {
             timestamp: now(),
             payload: {
               status: job.status,
-              resultPreview: previewDiagnosticText(result.final, 4000),
-              resultBytes: Buffer.byteLength(result.final, "utf8")
+              ...diagnosticTextFields("result", result.final)
             }
           });
           return job;
@@ -166,8 +170,7 @@ export class AgentOrchestrator {
         timestamp: now(),
         payload: {
           status: job.status,
-          errorPreview: previewDiagnosticText(message, 4000),
-          errorBytes: Buffer.byteLength(message, "utf8")
+          ...diagnosticTextFields("error", message)
         }
       });
       return job;
@@ -274,7 +277,7 @@ function sanitizeStepForPersistence(step: AgentStep): AgentStep {
   return {
     ...step,
     toolCall: step.toolCall ? sanitizeToolCallForPersistence(step.toolCall) : undefined,
-    observation: step.observation ? previewDiagnosticText(step.observation, OBSERVATION_PREVIEW_LIMIT) : undefined
+    observation: step.observation ? previewDiagnosticText(step.observation, DIAGNOSTIC_TEXT_PREVIEW_LIMIT) : undefined
   };
 }
 

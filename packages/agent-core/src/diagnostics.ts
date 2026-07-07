@@ -9,6 +9,8 @@ const SECRET_JSON_FIELD_PATTERN =
   /(["']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)["']?\s*:\s*["'])[^"']*(["'])/gi;
 const URL_PATTERN = /\bhttps?:\/\/[^\s"'<>]+/gi;
 
+export const DIAGNOSTIC_TEXT_PREVIEW_LIMIT = 4000;
+
 export function sanitizeDiagnosticValue(value: unknown, depth = 0): unknown {
   if (depth > 3) {
     return "[max depth]";
@@ -52,6 +54,13 @@ export function previewDiagnosticText(value: string, limit: number): string {
   return truncate(redactSensitiveText(value), limit);
 }
 
+export function diagnosticTextFields(field: string, value: string, limit = DIAGNOSTIC_TEXT_PREVIEW_LIMIT): Record<string, unknown> {
+  return {
+    [`${field}Preview`]: previewDiagnosticText(value, limit),
+    [`${field}Bytes`]: Buffer.byteLength(value, "utf8")
+  };
+}
+
 export function truncate(value: string, limit: number): string {
   return value.length > limit ? `${value.slice(0, limit)}...[truncated]` : value;
 }
@@ -60,20 +69,9 @@ export function jobEventPayload(job: AgentJob): Record<string, unknown> {
   const { task, result, error, ...jobWithoutSensitiveText } = job;
   return {
     ...jobWithoutSensitiveText,
-    taskPreview: previewDiagnosticText(task, 4000),
-    taskBytes: Buffer.byteLength(task, "utf8"),
-    ...(result
-      ? {
-          resultPreview: previewDiagnosticText(result, 4000),
-          resultBytes: Buffer.byteLength(result, "utf8")
-        }
-      : {}),
-    ...(error
-      ? {
-          errorPreview: previewDiagnosticText(error, 4000),
-          errorBytes: Buffer.byteLength(error, "utf8")
-        }
-      : {})
+    ...diagnosticTextFields("task", task),
+    ...(result ? diagnosticTextFields("result", result) : {}),
+    ...(error ? diagnosticTextFields("error", error) : {})
   };
 }
 
