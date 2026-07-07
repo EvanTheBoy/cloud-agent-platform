@@ -350,21 +350,20 @@ delivery.
 
 The platform persists basic job, step, and queue events. Postgres mode makes
 those events durable. A separate observability plan now records the next
-diagnostics work in `docs/OBSERVABILITY_PLAN.md`.
+diagnostics work in `docs/OBSERVABILITY_PLAN.md`. OpenAI-compatible LLM request
+and malformed tool-argument diagnostics are now persisted as job events. Tool
+execution and sandbox command diagnostics are also persisted as structured job
+events.
 
 ### Current Gaps
 
-- LLM provider failures do not include enough context to debug malformed tool
-  calls from persisted events alone.
-- Tool execution and sandbox command diagnostics are not yet structured as
-  first-class job events.
 - There are no metrics for latency, failure rate, queue depth, or Postgres pool
   health.
 - There is no tracing across API, queue, worker, LLM, and sandbox boundaries.
 
 ### Implementation Tasks
 
-1. Add LLM diagnostics events:
+1. ~~Add LLM diagnostics events:~~
 
 ```text
 llm.request.started
@@ -373,10 +372,14 @@ llm.tool_arguments_parse_failed
 llm.request.failed
 ```
 
-2. Ensure diagnostics never persist API keys, bearer tokens, cookies, or full
-   secret-bearing URLs.
-3. Add tool and sandbox diagnostics events.
-4. Add bounded previews for malformed model output and command output.
+2. ~~Ensure diagnostics never persist API keys, bearer tokens, cookies, or full
+   secret-bearing URLs.~~
+3. ~~Add tool and sandbox diagnostics events.~~
+4. ~~Add bounded previews for malformed model output and command output.~~ Done
+   for malformed LLM tool arguments, command output metadata, persisted step
+   events, and final job result event payloads; previews are redacted,
+   diagnostic writes are best-effort, and full command stdout/stderr are not
+   duplicated in diagnostics events.
 5. Add metrics for job status, queue latency, LLM latency, tool latency,
    sandbox failures, and Postgres pool/query health.
 6. Add tracing when API and worker processes are split.

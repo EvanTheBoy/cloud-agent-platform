@@ -6,6 +6,7 @@ import {
   InMemoryJobStore,
   OpenAiCompatibleProvider,
   PostgresJobStore,
+  sanitizeDiagnosticValue,
   defaultTools
 } from "../../../packages/agent-core/src/index.js";
 import type { JobQueue, JobStore, LlmProvider } from "../../../packages/agent-core/src/index.js";
@@ -84,7 +85,7 @@ function createJobQueue(options: AppOptions, store: JobStore): JobQueue {
       type: event.type,
       jobId: event.jobId,
       timestamp: new Date().toISOString(),
-      payload: event.payload ?? {}
+      payload: (event.payload ? sanitizeDiagnosticValue(event.payload) : {}) as Record<string, unknown>
     });
   };
 

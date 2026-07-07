@@ -37,11 +37,21 @@ The platform currently records:
 - Job creation and updates.
 - Queue lifecycle events.
 - Step started and finished events.
+- OpenAI-compatible LLM request, response, request failure, and malformed
+  tool-argument diagnostics.
+- Tool execution start, finish, and failure diagnostics.
+- Sandbox command start, finish, and failure diagnostics with output byte counts
+  and truncation flags.
+- Step started/finished events store tool input and observation previews instead
+  of full unbounded payloads.
+- Job result remains the user-visible business artifact, while job event
+  payloads store only redacted, bounded result previews.
 - Final job status and error message.
 - Durable event history in Postgres when `STORE_DRIVER=postgres`.
 
-This is enough to see that a job failed, but not always enough to know why a
-provider, model, tool call, sandbox command, or event stream failed.
+This is enough to see that a job failed and to diagnose malformed
+OpenAI-compatible tool-call arguments, thrown tool errors, and sandbox command
+execution behavior. Metrics and tracing diagnostics are still incomplete.
 
 ## Observability Goals
 
@@ -96,6 +106,7 @@ Suggested payloads:
   "model": "qwen-plus",
   "baseUrlHost": "example.com",
   "toolName": "shell.exec",
+  "reason": "invalid_json",
   "rawArgumentsPreview": "{\"command\" \"sh\"}",
   "rawArgumentsLength": 16,
   "parseError": "Expected ':' after property name in JSON at position 10"
@@ -117,7 +128,8 @@ Suggested payloads:
   "toolName": "shell.exec",
   "inputPreview": {
     "command": "sh",
-    "args": ["-lc", "find . -type f"]
+    "argsCount": 2,
+    "requestedTimeoutMs": 30000
   }
 }
 ```
@@ -125,18 +137,15 @@ Suggested payloads:
 ```json
 {
   "toolName": "shell.exec",
-  "exitCode": 0,
   "durationMs": 125,
-  "stdoutBytes": 2048,
-  "stderrBytes": 0
+  "observationBytes": 2200,
+  "final": false
 }
 ```
 
 ### Sandbox Events
 
 ```text
-sandbox.prepare.started
-sandbox.prepare.finished
 sandbox.command.started
 sandbox.command.finished
 sandbox.command.failed
@@ -145,7 +154,7 @@ sandbox.command.failed
 Useful fields:
 
 - Sandbox driver: `local` or `docker`.
-- Timeout.
+- Requested timeout when the tool supplied one.
 - Exit code.
 - Duration.
 - Output byte counts.
@@ -168,13 +177,11 @@ enqueue operation should still be considered successful because the worker can
 already consume the job from Redis. The event persistence failure should be
 tracked separately instead of changing job status.
 
-The same best-effort rule applies to `queue.active`. If recording
-`queue.active` fails, the worker should still run the job. In that case the
-persisted event stream will not explicitly say that the `queue.active` write
-failed; the execution can only be inferred from later events such as
-`job.updated`, `step.started`, `queue.completed`, or `queue.failed`. Whether
-the missing `queue.active` event was an event persistence failure is only
-visible through worker fallback logs or metrics.
+The same best-effort rule applies to `queue.active` and diagnostic events such
+as `llm.*`, `tool.*`, and `sandbox.command.*`. If recording one of those events
+fails, the worker should still run the job. In that case the persisted event
+stream may have gaps; whether a missing event was an event persistence failure
+is only visible through fallback logs or metrics.
 
 Production follow-up options:
 
@@ -197,6 +204,7 @@ Never log:
 - Bearer tokens.
 - Authorization headers.
 - Cookies.
+- Full URLs.
 - SSH keys.
 - Full environment variables.
 - Full repository credentials or remote URLs containing credentials.
@@ -208,16 +216,21 @@ Allowed with limits:
 - Provider name.
 - HTTP status code.
 - Tool name.
-- Truncated tool argument previews.
+- Redacted and truncated tool argument previews.
 - Truncated model response previews for parse failures.
+- Redacted tool input previews for diagnostic events.
+- Redacted and truncated step observation previews.
+- Redacted and truncated final result previews.
 
 Recommended limits:
 
 ```text
-rawArgumentsPreview: first 2000 characters
+rawArgumentsPreview: first 500 characters after redaction
 responsePreview: first 4000 characters
 stdoutPreview: first 4000 characters
 stderrPreview: first 4000 characters
+step observation preview: first 4000 characters after redaction
+job result preview: first 4000 characters after redaction
 ```
 
 Store full command stdout/stderr as artifacts later, not as unbounded job event
@@ -227,7 +240,10 @@ payloads.
 
 ### Phase 1: LLM Diagnostics
 
-1. Extend `JobEventType` with:
+Status: implemented for OpenAI-compatible request lifecycle events and
+malformed tool-call argument parsing.
+
+1. ~~Extend `JobEventType` with:~~
 
 ```text
 llm.request.started
@@ -236,7 +252,7 @@ llm.tool_arguments_parse_failed
 llm.request.failed
 ```
 
-2. Give the LLM provider a diagnostics callback, for example:
+2. ~~Give the LLM provider a diagnostics callback, for example:~~
 
 ```ts
 type LlmDiagnostics = (event: {
@@ -245,8 +261,8 @@ type LlmDiagnostics = (event: {
 }) => Promise<void>;
 ```
 
-3. Wire the orchestrator so diagnostics events include the current `jobId`.
-4. On `JSON.parse` failure for tool arguments, record:
+3. ~~Wire the orchestrator so diagnostics events include the current `jobId`.~~
+4. ~~On `JSON.parse` failure for tool arguments, record:~~
    - provider
    - model
    - base URL host
@@ -254,14 +270,22 @@ type LlmDiagnostics = (event: {
    - raw argument preview
    - raw argument length
    - parse error
-5. Keep throwing the original failure so job status still becomes `failed`.
+5. ~~Keep throwing the original failure so job status still becomes `failed`.~~
 
 ### Phase 2: Tool And Sandbox Diagnostics
 
-1. Emit tool start/finish/failure events around tool execution.
-2. Emit sandbox command start/finish/failure events around command execution.
-3. Record output sizes and truncation status.
-4. Avoid duplicating full stdout/stderr in multiple event payloads.
+Status: implemented for orchestrator-managed tool execution and sandbox
+commands made through `sandbox.exec`.
+
+1. ~~Emit tool start/finish/failure events around tool execution.~~
+2. ~~Emit sandbox command start/finish/failure events around command execution.~~
+3. ~~Record output sizes and truncation status.~~
+4. ~~Avoid duplicating full stdout/stderr in multiple event payloads.~~
+5. ~~Keep diagnostic event writes best-effort so observability failures do not
+   change job behavior.~~
+6. ~~Keep persisted step events and job step state bounded and redacted.~~
+7. ~~Keep final job result event payloads bounded and redacted without
+   modifying the user-visible `jobs.result` value.~~
 
 ### Phase 3: Metrics And Tracing
 
@@ -293,6 +317,8 @@ No persisted event should expose API keys or authorization secrets.
 
 ## Current Follow-Up
 
-The immediate next observability task is to add LLM diagnostics for
-OpenAI-compatible tool-call parsing failures. This will turn the current
-inference-based debugging process into event-based debugging.
+The immediate next observability task is Phase 3: process-level metrics for job
+status, LLM latency, tool latency, sandbox command duration/failures, queue
+latency, and Postgres pool/query health. Distributed tracing across API, queue,
+worker, LLM, and sandbox boundaries should follow once those metrics are in
+place.

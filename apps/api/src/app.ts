@@ -4,6 +4,7 @@ import Fastify from "fastify";
 import { realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 import { z } from "zod";
+import { diagnosticTextFields } from "../../../packages/agent-core/src/index.js";
 import { closeAgentRuntime, createApiRuntime, createWorkerRuntime } from "./runtime.js";
 import type { ApiRuntime, WorkerRuntime } from "./runtime.js";
 
@@ -94,7 +95,7 @@ export async function buildApp(options: AppOptions) {
         timestamp: new Date().toISOString(),
         payload: {
           status: failedJob.status,
-          error: failedJob.error,
+          ...diagnosticTextFields("error", failedJob.error ?? ""),
           failureKind: "enqueue"
         }
       });

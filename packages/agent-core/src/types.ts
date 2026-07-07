@@ -46,6 +46,16 @@ export type JobEventType =
   | "step.started"
   | "step.finished"
   | "job.finished"
+  | "llm.request.started"
+  | "llm.response.received"
+  | "llm.tool_arguments_parse_failed"
+  | "llm.request.failed"
+  | "tool.started"
+  | "tool.finished"
+  | "tool.failed"
+  | "sandbox.command.started"
+  | "sandbox.command.finished"
+  | "sandbox.command.failed"
   | "queue.enqueued"
   | "queue.active"
   | "queue.completed"
@@ -122,6 +132,8 @@ export interface Tool {
   execute(input: Record<string, unknown>, context: ToolContext): Promise<ToolResult>;
 }
 
+export type LlmDiagnostics = (event: { type: JobEventType; payload: Record<string, unknown> }) => Promise<void>;
+
 export interface LlmProvider {
-  complete(messages: AgentMessage[], tools: Tool[]): Promise<LlmResponse>;
+  complete(messages: AgentMessage[], tools: Tool[], diagnostics?: LlmDiagnostics): Promise<LlmResponse>;
 }

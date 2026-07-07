@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
-import type { AgentMessage, LlmProvider, LlmResponse, Tool } from "./types.js";
+import type { AgentMessage, LlmDiagnostics, LlmProvider, LlmResponse, Tool } from "./types.js";
+import { previewDiagnosticText, redactSensitiveText } from "./diagnostics.js";
 
 export class DemoLlmProvider implements LlmProvider {
   async complete(messages: AgentMessage[], _tools: Tool[]): Promise<LlmResponse> {
@@ -113,6 +114,7 @@ const toolSchemas: Record<string, Record<string, unknown>> = {
 };
 
 const toOpenAiToolName = (name: string) => name.replace(/[^a-zA-Z0-9_-]/g, "_");
+const RAW_ARGUMENTS_PREVIEW_LIMIT = 500;
 
 export class OpenAiCompatibleProvider implements LlmProvider {
   private readonly apiKey: string;
@@ -125,48 +127,108 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     this.model = options.model ?? "gpt-4.1-mini";
   }
 
-  async complete(messages: AgentMessage[], tools: Tool[]): Promise<LlmResponse> {
-    const response = await fetch(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${this.apiKey}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
+  async complete(messages: AgentMessage[], tools: Tool[], diagnostics?: LlmDiagnostics): Promise<LlmResponse> {
+    const startedAt = Date.now();
+    await diagnostics?.({
+      type: "llm.request.started",
+      payload: {
+        provider: "openai-compatible",
         model: this.model,
-        messages: this.toOpenAiMessages(messages),
-        tools: tools.map((tool) => {
-          const apiName = toOpenAiToolName(tool.name);
-          return {
-            type: "function",
-            function: {
-              name: apiName,
-              description: `${tool.description} Internal tool name: ${tool.name}.`,
-              parameters: toolSchemas[tool.name] ?? {
-                type: "object",
-                additionalProperties: true
-              }
-            }
-          };
-        }),
-        tool_choice: "auto"
-      })
+        baseUrlHost: this.baseUrlHost(),
+        messageCount: messages.length,
+        toolCount: tools.length
+      }
     });
 
-    const payload = (await response.json().catch(() => ({}))) as OpenAiChatResponse;
-    if (!response.ok) {
-      throw new Error(`OpenAI-compatible API request failed: ${payload.error?.message ?? response.statusText}`);
+    const requestUrl = `${this.baseUrl.replace(/\/$/, "")}/chat/completions`;
+    let response: Response;
+    let payload: OpenAiChatResponse;
+
+    try {
+      response = await fetch(requestUrl, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${this.apiKey}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: this.model,
+          messages: this.toOpenAiMessages(messages),
+          tools: tools.map((tool) => {
+            const apiName = toOpenAiToolName(tool.name);
+            return {
+              type: "function",
+              function: {
+                name: apiName,
+                description: `${tool.description} Internal tool name: ${tool.name}.`,
+                parameters: toolSchemas[tool.name] ?? {
+                  type: "object",
+                  additionalProperties: true
+                }
+              }
+            };
+          }),
+          tool_choice: "auto"
+        })
+      });
+
+      payload = (await response.json().catch(() => ({}))) as OpenAiChatResponse;
+    } catch (error) {
+      const errorMessage = redactSensitiveText(error instanceof Error ? error.message : String(error));
+      await diagnostics?.({
+        type: "llm.request.failed",
+        payload: {
+          provider: "openai-compatible",
+          model: this.model,
+          baseUrlHost: this.baseUrlHost(),
+          durationMs: Date.now() - startedAt,
+          error: errorMessage
+        }
+      });
+      throw new Error(errorMessage);
     }
+
+    if (!response.ok) {
+      const errorMessage = redactSensitiveText(payload.error?.message ?? response.statusText);
+      await diagnostics?.({
+        type: "llm.request.failed",
+        payload: {
+          provider: "openai-compatible",
+          model: this.model,
+          baseUrlHost: this.baseUrlHost(),
+          status: response.status,
+          durationMs: Date.now() - startedAt,
+          error: errorMessage
+        }
+      });
+      throw new Error(`OpenAI-compatible API request failed: ${errorMessage}`);
+    }
+
+    await diagnostics?.({
+      type: "llm.response.received",
+      payload: {
+        provider: "openai-compatible",
+        model: this.model,
+        status: response.status,
+        choiceCount: payload.choices?.length ?? 0,
+        toolCallCount: payload.choices?.[0]?.message?.tool_calls?.length ?? 0,
+        durationMs: Date.now() - startedAt
+      }
+    });
 
     const message = payload.choices?.[0]?.message;
     const content = message?.content?.trim() ?? "";
     const toolNameByApiName = new Map(tools.map((tool) => [toOpenAiToolName(tool.name), tool.name]));
-    const toolCalls =
-      message?.tool_calls?.map((call) => ({
+    const toolCalls: LlmResponse["toolCalls"] = [];
+    for (const call of message?.tool_calls ?? []) {
+      const toolName = toolNameByApiName.get(call.function?.name ?? "") ?? call.function?.name ?? "";
+      const rawArguments = call.function?.arguments ?? "{}";
+      toolCalls.push({
         id: call.id ?? nanoid(),
-        name: toolNameByApiName.get(call.function?.name ?? "") ?? call.function?.name ?? "",
-        input: this.parseArguments(call.function?.arguments ?? "{}")
-      })) ?? [];
+        name: toolName,
+        input: await this.parseArguments(rawArguments, toolName, diagnostics)
+      });
+    }
 
     if (toolCalls.length > 0) {
       return {
@@ -208,12 +270,59 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     });
   }
 
-  private parseArguments(rawArguments: string): Record<string, unknown> {
-    const parsed = JSON.parse(rawArguments) as unknown;
+  private async parseArguments(
+    rawArguments: string,
+    toolName: string,
+    diagnostics?: LlmDiagnostics
+  ): Promise<Record<string, unknown>> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawArguments) as unknown;
+    } catch (error) {
+      await this.emitToolArgumentsParseFailed(
+        rawArguments,
+        toolName,
+        redactSensitiveText(error instanceof Error ? error.message : String(error)),
+        diagnostics
+      );
+      throw error;
+    }
+
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      await this.emitToolArgumentsParseFailed(rawArguments, toolName, "Tool arguments must be a JSON object.", diagnostics, "not_object");
       throw new Error("Tool arguments must be a JSON object.");
     }
 
     return parsed as Record<string, unknown>;
+  }
+
+  private async emitToolArgumentsParseFailed(
+    rawArguments: string,
+    toolName: string,
+    parseError: string,
+    diagnostics?: LlmDiagnostics,
+    reason = "invalid_json"
+  ): Promise<void> {
+    await diagnostics?.({
+      type: "llm.tool_arguments_parse_failed",
+      payload: {
+        provider: "openai-compatible",
+        model: this.model,
+        baseUrlHost: this.baseUrlHost(),
+        toolName,
+        reason,
+        rawArgumentsPreview: previewDiagnosticText(rawArguments, RAW_ARGUMENTS_PREVIEW_LIMIT),
+        rawArgumentsLength: rawArguments.length,
+        parseError
+      }
+    });
+  }
+
+  private baseUrlHost(): string {
+    try {
+      return new URL(this.baseUrl).host;
+    } catch {
+      return "unknown";
+    }
   }
 }
