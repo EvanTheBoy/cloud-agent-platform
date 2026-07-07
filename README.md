@@ -9,6 +9,9 @@ Users submit a natural-language task. The platform creates an isolated workspace
 - **TypeScript / Node.js**: API server, orchestration loop, job state, tool routing, WebSocket streaming.
 - **Fastify**: HTTP and WebSocket API.
 - **In-memory queue/store**: local demo adapter; replace with BullMQ/Redis and Postgres in production.
+- **Prometheus-style metrics and trace context**: process-local runtime metrics
+  plus job-event trace fields for reconstructing API -> queue -> worker -> LLM
+  -> tool -> sandbox execution.
 - **Sandbox package**: local process sandbox for demo, with a Docker executor interface documented for production.
 - **Python/Bash/Node ready**: tool execution is language-agnostic inside sandbox workspaces.
 
@@ -58,13 +61,13 @@ A successful run looks like this at the top level:
     "result": "..."
   },
   "events": [
-    { "type": "job.created" },
-    { "type": "queue.enqueued" },
-    { "type": "queue.active" },
-    { "type": "step.started" },
-    { "type": "step.finished" },
-    { "type": "job.finished" },
-    { "type": "queue.completed" }
+    { "type": "job.created", "payload": { "traceId": "..." } },
+    { "type": "queue.enqueued", "payload": { "traceId": "...", "spanId": "..." } },
+    { "type": "queue.active", "payload": { "traceId": "...", "spanId": "...", "parentSpanId": "..." } },
+    { "type": "step.started", "payload": { "traceId": "..." } },
+    { "type": "step.finished", "payload": { "traceId": "..." } },
+    { "type": "job.finished", "payload": { "traceId": "..." } },
+    { "type": "queue.completed", "payload": { "traceId": "..." } }
   ]
 }
 ```
@@ -75,6 +78,8 @@ The important checks are:
 - `job.steps` contains one or more tool calls such as `shell.exec`.
 - `job.result` contains the final agent output.
 - `events` shows the lifecycle from creation through queue completion.
+- Event payloads include trace fields when trace context is available, so the
+  in-platform trace tree can be reconstructed from job history.
 
 For local demos the API copies `DEFAULT_SOURCE_PATH` into the job sandbox, excluding `node_modules`, `dist`, `.git`, and prior `workspace-runs`. You can override it per request:
 
@@ -207,6 +212,12 @@ when the worker runs in a container and Prometheus needs to scrape it over the
 container network. Prometheus should scrape both API and worker targets in
 BullMQ mode because LLM, tool, sandbox, and orchestrator metrics are recorded in
 the worker process.
+
+Job events also carry trace context in BullMQ mode. The API creates a root trace
+context, the queue span is stored in BullMQ job data, and the worker continues
+the same trace for LLM, tool, and sandbox diagnostics. This is an in-platform
+trace reconstruction path today; future OpenTelemetry integration can export the
+same span boundaries to an external collector.
 
 BullMQ mode persists queued job dispatch in Redis and applies exponential
 backoff for processor errors. In BullMQ mode, the API creates jobs and enqueues
